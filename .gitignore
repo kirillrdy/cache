@@ -1,0 +1,7 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+zigcache/zigcache
+
+# purecache disk store written by the example
+.purecache/
