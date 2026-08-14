@@ -11,7 +11,29 @@
 //! is a compile error at the `Memo` call site rather than a surprise later.
 
 const std = @import("std");
+const identity = @import("identity.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+
+/// Binds a body of source, so each cached function costs one line.
+///
+///     const here = cache.Source(@embedFile("demo.zig"));
+///     const cachedScore = here.memo("score", score);
+///
+/// The identity is derived from that source at compile time, so there is no
+/// generated file to import and no build step to forget.
+pub fn Source(comptime source: []const u8) type {
+    return struct {
+        /// The memoised form of `f`, keyed on the source of `name`.
+        pub fn memo(comptime name: []const u8, comptime f: anytype) @TypeOf(Memo("", f).call) {
+            return Memo(identity.of(source, name), f).call;
+        }
+
+        /// The cache identity of `name`, for display.
+        pub fn id(comptime name: []const u8) []const u8 {
+            return identity.of(source, name);
+        }
+    };
+}
 
 pub const Stats = struct { hits: usize = 0, misses: usize = 0 };
 pub var stats: Stats = .{};

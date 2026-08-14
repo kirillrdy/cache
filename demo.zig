@@ -1,12 +1,15 @@
 //! A program whose expensive functions are cached.
 //!
 //! Everything here is one file on purpose: the pure functions, the memoised
-//! wrappers around them, and a `main` that exercises both. `build.zig` runs
-//! the analyser over this same file to derive each function's cache identity.
+//! wrappers around them, and a `main` that exercises both. Each function's
+//! cache identity is derived from this file at compile time -- no generated
+//! file, no build step.
 
 const std = @import("std");
 const cache = @import("cache");
-const ids = @import("cache_ids");
+
+/// One binding for the whole file; each cached function then costs one line.
+const here = cache.Source(@embedFile("demo.zig"));
 
 // ------------------------------------------------------ the pure functions ---
 
@@ -51,10 +54,11 @@ fn normalise(v: f64) f64 {
 
 // ----------------------------------------------------------- the wrappers ---
 
-/// `ids.score` is the checksum the analyser derived from `score` and
-/// everything it reaches. The original functions stay callable and uncached.
-const cachedSlowFib = cache.Memo(ids.slowFib, slowFib).call;
-const cachedScore = cache.Memo(ids.score, score).call;
+/// The checksum is derived from this file at compile time, covering each
+/// function and everything it transitively references. The originals stay
+/// callable and uncached.
+const cachedSlowFib = here.memo("slowFib", slowFib);
+const cachedScore = here.memo("score", score);
 
 // ----------------------------------------------------------------- main ---
 
@@ -62,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
     try cache.open(init.io, ".zigcache");
     defer cache.close();
 
-    std.debug.print("cache identity of slowFib: {s}\n\n", .{ids.slowFib[0..16]});
+    std.debug.print("identities: slowFib={s} score={s}\n\n", .{ here.id("slowFib")[0..16], here.id("score")[0..16] });
 
     const w: Weights = .{ .alpha = 2, .beta = 0.5 };
     const xs: []const f64 = &.{ 1, 2, 3, 4, 5 };

@@ -4,8 +4,9 @@ Function-call caching keyed on a checksum of the function's source and its
 arguments.
 
 ```
-cache.zig      library: comptime argument hashing, memo wrappers, disk store
-analyser.zig   tool: transitive source checksum + purity checks
+cache.zig      library: memo wrappers, comptime argument hashing, disk store
+identity.zig   library: transitive source checksum, computed at comptime
+analyser.zig   optional linter: reports observable purity violations
 demo.zig       example: pure functions, cached wrappers, and a main
 impure.zig     example: functions that falsely claim purity, and a main
 ```
@@ -14,7 +15,7 @@ impure.zig     example: functions that falsely claim purity, and a main
 zig build test                       # runtime tests
 zig build run                        # the caching demo; run it twice
 zig build run-impure                 # why the impure examples cannot be cached
-zig-out/bin/zigcache impure.zig      # the analyser; exits 1 with 5 violations
+zig-out/bin/zigcache impure.zig      # optional linter; exits 1 with 5 violations
 ```
 
 ## The key
@@ -38,25 +39,36 @@ meets `+0.0`, and the type name is part of the encoding so `u32(1)` ≠ `u64(1)`
 
 ```zig
 const cache = @import("cache");
-const ids = @import("cache_ids");
 
-///cache:pure
+const here = cache.Source(@embedFile("demo.zig"));
+
 pub fn score(xs: []const f64, w: Weights) f64 { ... }
 
-const cachedScore = cache.Memo(ids.score, score).call;
+const cachedScore = here.memo("score", score);
 
 cachedScore(.{ xs, w });
 ```
 
-`build.zig` runs the analyser as a build step, so ids regenerate whenever the
-analysed source changes and the generated file never lands in the source tree:
+That is the whole setup. One binding for the file, one line per cached
+function. No generated file to import, no build step to wire up, and no way for
+the checksum to be stale with respect to the source — the compiler derives it
+from the same bytes it is compiling.
 
-```zig
-const gen = b.addRunArtifact(analyser);
-gen.addFileArg(b.path("demo.zig"));
-const ids_file = gen.addOutputFileArg("cache_ids.zig");
-demo_mod.addAnonymousImport("cache_ids", .{ .root_source_file = ids_file });
-```
+## The checksum is computed at comptime
+
+`std.zig.Tokenizer` does not allocate, which means **it runs at compile time**,
+and so does `std.crypto.hash.sha2.Sha256`. So `identity.zig` tokenizes
+`@embedFile`'d source inside the compiler, finds container-level declarations
+by tracking brace depth, walks the transitive closure of the names each one
+mentions, and hashes the lot — all before the program exists.
+
+That removes the parts a normal codegen approach needs: no `cache_ids.zig`, no
+`addRunArtifact`/`addOutputFileArg` plumbing, no import of a generated module,
+and no separate tool that has to be kept in sync with the runtime.
+
+Only a tokenizer is available — `std.zig.Ast` allocates — so declaration
+boundaries come from brace depth rather than a parse. That is enough for
+container-level declarations, which is all a cache identity needs.
 
 ## It works
 
@@ -89,30 +101,42 @@ Verified invalidation semantics:
 
 | change to `demo.zig` | `score` | `slowFib` |
 |---|---|---|
-| baseline | `e097fddc` | `035410b0` |
-| rewrote a doc comment, added `//` comment and blank lines | `e097fddc` | `035410b0` |
-| renamed a local in callee `sum` | `86355b44` | `035410b0` |
-| `const scale` 1000 → 100, read via `normalise` | `cac91ad2` | `035410b0` |
-| added a field to `Weights` | `fe9e5b80` | `035410b0` |
+| baseline | `bb35898d` | `ec859488` |
+| edited `main`, unrelated to either | `bb35898d` | `ec859488` |
+| rewrote a doc comment, added `//` comment and blank lines | `bb35898d` | `ec859488` |
+| renamed a local in callee `sum` | `3bf28b3e` | `ec859488` |
+| `const scale` 1000 → 100, read via `normalise` | `f346a75b` | `ec859488` |
+| added a field to `Weights` | `797753f8` | `ec859488` |
+
+The second row matters most: the embedded source is the *whole file*, including
+`main` and the wrappers, yet an edit to `main` moves nothing. Granularity comes
+from the transitive closure, not from what was embedded.
 
 ## `///cache:pure` is a promise, not a proof
 
-There is no allowlist of blessed namespaces or builtins. Whether `std.foo.bar`
-is pure is not a question a syntactic pass can answer, and guessing is worse
-than not guessing in both directions: a false positive blocks correct code, and
-a false negative is the dangerous one — it reads as a guarantee that was never
+It is also, now, purely advisory. It used to gate id generation — without it
+you got no `ids.score` and the build broke. Since identities are derived at
+comptime from the source, `here.memo("score", score)` works whether or not the
+function carries the annotation. All it does today is tell the optional linter
+which functions to look at.
+
+Nothing verifies purity, and nothing in the runtime consumes it: `Memo` will
+happily cache a blatantly impure function if you hand it one. There is no
+allowlist of blessed namespaces or builtins either. Whether `std.foo.bar` is
+pure is not a question a syntactic pass can answer, and guessing is worse than
+not guessing in both directions: a false positive blocks correct code, and a
+false negative is the dangerous one — it reads as a guarantee that was never
 checked.
 
-So the annotation is the author's assertion and the tool takes it. What it
-still reports is only what it can observe directly, offered as a service rather
-than a gate:
+So the annotation is the author's assertion. What the linter reports is only
+what it can observe directly, offered as a service rather than a gate:
 
 - reaching a container-level `var`, transitively through callees
 - mutating through a parameter, which contradicts the promise
 - parameters whose values cannot be hashed at all: `anytype` and function
   parameters
 
-`impure.zig` is split along exactly that line — five functions the analyser
+`impure.zig` is split along exactly that line -- five functions the linter
 catches, two it knowingly does not. `zig build run-impure` shows all of them
 returning different answers for the same arguments.
 
@@ -122,8 +146,7 @@ A function that takes neither is already close to pure by construction.
 
 ## Arguments
 
-`///cache:pure` is the only annotation. There is deliberately no per-parameter
-opt-in for pointers and slices.
+There is deliberately no per-parameter opt-in for pointers and slices.
 
 - **value types** (numbers, bools, enums, arrays, structs of those) — hashed
   as-is
@@ -175,6 +198,9 @@ produced different keys. The NaN test caught that.
 - **Structural checks are token patterns.** `std.zig.Ast` has no generic walker
   (no `ast.Inspect` equivalent), so `checkBody`'s mutation-through-parameter
   check matches a token sequence rather than inspecting assignment nodes.
+- **Comptime cost.** Deriving identities runs a tokenizer and SHA-256 inside
+  the compiler, with `(2_000_000)`. Fine for a file this
+  size; a large file with many cached functions would want measuring.
 - **No eviction, no size bound, no TTL** on the disk store.
 
 ## History

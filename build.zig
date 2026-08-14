@@ -23,19 +23,14 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(analyser);
 
-    // Running it is a build step, so the checksums are regenerated whenever
-    // the analysed source changes and never land in the source tree.
-    const gen = b.addRunArtifact(analyser);
-    gen.addFileArg(b.path("demo.zig"));
-    const ids_file = gen.addOutputFileArg("cache_ids.zig");
-
+    // No codegen step: cache identities are derived at compile time from
+    // @embedFile, so there is nothing to generate and nothing to wire in.
     const demo_mod = b.createModule(.{
         .root_source_file = b.path("demo.zig"),
         .target = target,
         .optimize = optimize,
     });
     demo_mod.addImport("cache", cache_mod);
-    demo_mod.addAnonymousImport("cache_ids", .{ .root_source_file = ids_file });
 
     const demo = b.addExecutable(.{ .name = "demo", .root_module = demo_mod });
     b.installArtifact(demo);
