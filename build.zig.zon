@@ -9,7 +9,6 @@
         "zimo.zig",
         "identity.zig",
         "demo.zig",
-        "impure.zig",
         "README.md",
     },
 }

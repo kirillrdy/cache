@@ -7,13 +7,11 @@ arguments.
 zimo.zig       library: memo wrappers, comptime argument hashing, disk store
 identity.zig   library: transitive source checksum, computed at comptime
 demo.zig       example: pure functions, cached wrappers, and a main
-impure.zig     example: impure functions and a main
 ```
 
 ```sh
 zig build test                       # runtime tests
 zig build run                        # the caching demo; run it twice
-zig build run-impure                 # why the impure examples cannot be cached
 ```
 
 ## The key
@@ -122,10 +120,6 @@ impure function if you pass it one. What *is* verified at compile time via
 `@typeInfo` are structural guarantees:
 - arguments must be hashable by content (e.g. no `anytype`, no function pointers)
 - results must be self-contained (no pointers that would dangle across processes)
-
-`impure.zig` demonstrates various forms of impurity — from container-level mutable
-state to wall-clock reads — and `zig build run-impure` shows why caching them yields
-stale or incorrect results.
 
 In Zig, reaching the outside world mostly means taking an `Io` or an allocator,
 which naturally surfaces in the function signature. A function taking neither is
