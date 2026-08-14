@@ -1,8 +1,7 @@
 const std = @import("std");
-const zigcache = @import("cache");
+const cache = @import("cache");
 
-const here = zigcache.Source(@This(), @embedFile("demo.zig"));
-const cache = here.call;
+const here = cache.Source(@This(), @embedFile("demo.zig"));
 
 const scale: f64 = 1000.0;
 
@@ -31,8 +30,8 @@ fn normalise(v: f64) f64 {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try zigcache.open(init.io, ".zigcache");
-    defer zigcache.close();
+    try cache.open(init.io, ".zigcache");
+    defer cache.close();
 
     std.debug.print("identities: slowFib={s} score={s}\n\n", .{ here.id(.slowFib)[0..16], here.id(.score)[0..16] });
 
@@ -42,14 +41,14 @@ pub fn main(init: std.process.Init) !void {
     const changed: []const f64 = &.{ 1, 2, 3, 4, 6 };
 
     var t = Trace.start(init.io);
-    t.report("slowFib(34)", cache(.slowFib, .{34}));
-    t.report("slowFib(34)", cache(.slowFib, .{34}));
-    t.report("score", cache(.score, .{ xs, w }));
-    t.report("score", cache(.score, .{ xs, w }));
-    t.report("score (copy)", cache(.score, .{ copy, w }));
-    t.report("score (changed)", cache(.score, .{ changed, w }));
+    t.report("slowFib(34)", here.call(.slowFib, .{34}));
+    t.report("slowFib(34)", here.call(.slowFib, .{34}));
+    t.report("score", here.call(.score, .{ xs, w }));
+    t.report("score", here.call(.score, .{ xs, w }));
+    t.report("score (copy)", here.call(.score, .{ copy, w }));
+    t.report("score (changed)", here.call(.score, .{ changed, w }));
 
-    std.debug.print("\nhits={d} misses={d}\n", .{ zigcache.stats.hits, zigcache.stats.misses });
+    std.debug.print("\nhits={d} misses={d}\n", .{ cache.stats.hits, cache.stats.misses });
 }
 
 const Trace = struct {
@@ -61,16 +60,16 @@ const Trace = struct {
         return .{
             .io = io,
             .mark = .now(io, .awake),
-            .hits = zigcache.stats.hits,
+            .hits = cache.stats.hits,
         };
     }
 
     fn report(t: *Trace, label: []const u8, value: anytype) void {
         const now: std.Io.Clock.Timestamp = .now(t.io, .awake);
         const us: u64 = @intCast(@max(0, t.mark.durationTo(now).raw.toMicroseconds()));
-        const status = if (zigcache.stats.hits > t.hits) "HIT " else "MISS";
+        const status = if (cache.stats.hits > t.hits) "HIT " else "MISS";
         std.debug.print("{s: <18} {s} {d: >8}us -> {any}\n", .{ label, status, us, value });
-        t.hits = zigcache.stats.hits;
+        t.hits = cache.stats.hits;
         t.mark = .now(t.io, .awake);
     }
 };

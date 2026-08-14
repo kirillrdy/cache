@@ -52,8 +52,7 @@ fn ReturnType(comptime Container: type, comptime target: anytype) type {
 /// Binds a container scope and its source text, so each cached function costs one line.
 ///
 ///     const here = cache.Source(@This(), @embedFile("demo.zig"));
-///     const cache = here.call;
-///     cache(.score, .{ xs, w });
+///     here.call(.score, .{ xs, w });
 ///
 /// The identity is derived from that source at compile time, so there is no
 /// generated file to import and no build step to forget.
@@ -61,8 +60,7 @@ pub fn Source(comptime Container: type, comptime source: []const u8) type {
     return struct {
         /// Directly call the memoised form of `target` (.name, "name", or pub fn).
         ///
-        ///     const cache = here.call;
-        ///     cache(.slowFib, .{34});
+        ///     here.call(.slowFib, .{34});
         pub fn call(comptime target: anytype, args: anytype) ReturnType(Container, target) {
             const name = comptime declName(Container, target);
             const f = @field(Container, name);

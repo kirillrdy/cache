@@ -37,14 +37,13 @@ meets `+0.0`, and the type name is part of the encoding so `u32(1)` ≠ `u64(1)`
 
 ```zig
 const std = @import("std");
-const zigcache = @import("cache");
+const cache = @import("cache");
 
-const here = zigcache.Source(@This(), @embedFile("demo.zig"));
-const cache = here.call;
+const here = cache.Source(@This(), @embedFile("demo.zig"));
 
 pub fn score(xs: []const f64, w: Weights) f64 { ... }
 
-cache(.score, .{ xs, w });
+here.call(.score, .{ xs, w });
 ```
 
 That is the whole setup. One binding for the file, one line per cached
