@@ -48,18 +48,12 @@ pub fn generic(x: anytype) usize {
     return @sizeOf(@TypeOf(x));
 }
 
-/// Mutates through a parameter, so the `///cache:deep` promise is false.
+/// Consumes the thing it was handed, so a second call with "the same"
+/// argument is not the same call at all.
 ///cache:pure
-///cache:deep b
 pub fn clobber(b: *Buffer) usize {
     b.data = b.data[0..b.data.len -| 1];
     return b.data.len;
-}
-
-/// Reference parameter with no `///cache:deep` promise.
-///cache:pure
-pub fn unmarked(xs: []const u64) usize {
-    return xs.len;
 }
 
 // ---------------------------------------------------------------------------

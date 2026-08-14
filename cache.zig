@@ -104,7 +104,7 @@ fn hashValue(h: *Sha256, comptime T: type, v: T) void {
         .array => |a| for (v) |elem| hashValue(h, a.child, elem),
         .pointer => |p| switch (p.size) {
             // Contents, not address: identity is not observable to a pure
-            // function. This is what `///cache:deep` promises is safe.
+            // function, so hashing it would be wrong in every case.
             .one => {
                 if (@typeInfo(p.child) == .@"fn") @compileError("zigcache: cannot hash " ++
                     @typeName(T) ++ "; a function has no content a pure function could depend on");

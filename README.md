@@ -14,7 +14,7 @@ impure.zig     example: functions that falsely claim purity, and a main
 zig build test                       # runtime tests
 zig build run                        # the caching demo; run it twice
 zig build run-impure                 # why the impure examples cannot be cached
-zig-out/bin/zigcache impure.zig      # the analyser; exits 1 with 6 violations
+zig-out/bin/zigcache impure.zig      # the analyser; exits 1 with 5 violations
 ```
 
 ## The key
@@ -41,7 +41,6 @@ const cache = @import("cache");
 const ids = @import("cache_ids");
 
 ///cache:pure
-///cache:deep xs
 pub fn score(xs: []const f64, w: Weights) f64 { ... }
 
 const cachedScore = cache.Memo(ids.score, score).call;
@@ -109,11 +108,11 @@ still reports is only what it can observe directly, offered as a service rather
 than a gate:
 
 - reaching a container-level `var`, transitively through callees
-- mutating through a parameter, which falsifies a `///cache:deep` promise
-- parameters whose values cannot be hashed at all: `anytype`, function
-  parameters, and pointer/slice parameters with no `///cache:deep`
+- mutating through a parameter, which contradicts the promise
+- parameters whose values cannot be hashed at all: `anytype` and function
+  parameters
 
-`impure.zig` is split along exactly that line — six functions the analyser
+`impure.zig` is split along exactly that line — five functions the analyser
 catches, two it knowingly does not. `zig build run-impure` shows all of them
 returning different answers for the same arguments.
 
@@ -121,18 +120,24 @@ Worth noting how visible impurity is in Zig anyway: reaching the outside world
 mostly means taking an `Io` or an allocator, so it shows up in the signature.
 A function that takes neither is already close to pure by construction.
 
-## Marking arguments
+## Arguments
 
-An argument is safe to hash when hashing its value fully determines the
-function's behaviour on it.
+`///cache:pure` is the only annotation. There is deliberately no per-parameter
+opt-in for pointers and slices.
 
 - **value types** (numbers, bools, enums, arrays, structs of those) — hashed
-  as-is, no annotation
-- **pointers and slices** — require `///cache:deep <names>`. That directive is
-  the author's promise: *the callee does not mutate this, and no one else
-  mutates it for the lifetime of the entry.* The analyser checks the first
-  half; the second is unprovable locally and is what the annotation buys.
+  as-is
+- **pointers and slices** — hashed by content, following the pointer. That is
+  the only sound choice: a pure function cannot observe an address, so hashing
+  identity would be wrong in every case. And that nobody mutates the referent
+  behind the cache's back is already part of what `///cache:pure` asserts —
+  asking for the same promise twice is ceremony, not safety.
 - **`anytype`, function parameters** — rejected. No hashable content.
+
+An earlier version required `///cache:deep <names>` on every reference
+parameter. It was dropped for the same reason the namespace allowlists were: a
+directive that can only ever say one thing is not a decision, and re-stating a
+promise `///cache:pure` already covers does not make it any more true.
 
 ## The runtime is all comptime
 

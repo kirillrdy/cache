@@ -1,16 +1,21 @@
-//! zigcache -- the Zig port of purecache's checksummer and purity checker.
+//! zigcache -- the checksummer and purity checker.
 //!
-//!     zigcache <file.zig>
+//!     zigcache <file.zig> [ids-out.zig]
 //!
 //! For every top-level fn marked `///cache:pure`, derives a checksum over the
 //! function and every top-level declaration it transitively references.
 //!
 //! `///cache:pure` is the author's assertion, not a conclusion this tool
-//! reaches. There is no allowlist of blessed namespaces or builtins: deciding
-//! whether `std.foo.bar` is pure is not something a syntactic pass can do, and
-//! a guess that is wrong in either direction is worse than no guess -- a false
-//! positive blocks correct code, a false negative reads as a guarantee that
-//! was never checked.
+//! reaches, and it is the *only* annotation. There is no allowlist of blessed
+//! namespaces or builtins: deciding whether `std.foo.bar` is pure is not
+//! something a syntactic pass can do, and a guess that is wrong in either
+//! direction is worse than no guess -- a false positive blocks correct code, a
+//! false negative reads as a guarantee that was never checked.
+//!
+//! Pointer and slice parameters need no separate opt-in either. Hashing them
+//! by content is the only sound choice, and that nobody mutates the referent
+//! behind the cache's back is part of what `///cache:pure` already asserts;
+//! asking for the same promise twice is ceremony, not safety.
 //!
 //! What is still reported is only what the tool can observe directly, and only
 //! as a service to the author: reaching container-level `var`, mutating
@@ -36,7 +41,6 @@ const Decl = struct {
     /// `const x = @import("...")`.
     is_import: bool,
     pure: bool,
-    deep: std.ArrayList([]const u8),
 };
 
 const Report = struct {
@@ -153,15 +157,9 @@ fn collectDecls(gpa: Allocator, tree: Ast) !DeclMap {
             is_import = hasBuiltin(tree, node, "@import");
         } else continue;
 
-        var deep: std.ArrayList([]const u8) = .empty;
         var pure = false;
         for (try docComments(gpa, tree, node)) |line| {
-            if (std.mem.eql(u8, line, "cache:pure")) {
-                pure = true;
-            } else if (std.mem.startsWith(u8, line, "cache:deep ")) {
-                var it = std.mem.tokenizeAny(u8, line["cache:deep ".len..], " ,");
-                while (it.next()) |p| try deep.append(gpa, p);
-            }
+            if (std.mem.eql(u8, line, "cache:pure")) pure = true;
         }
 
         try map.put(gpa, name, .{
@@ -171,7 +169,6 @@ fn collectDecls(gpa: Allocator, tree: Ast) !DeclMap {
             .is_var = is_var,
             .is_import = is_import,
             .pure = pure and kind == .func,
-            .deep = deep,
         });
     }
     return map;
@@ -307,19 +304,12 @@ fn checkParams(gpa: Allocator, tree: Ast, d: Decl, report: *Report) !void {
         const type_node = param.type_expr orelse continue;
         const ty = try canonical(gpa, tree, type_node);
 
-        // Crude but conservative: any pointer or slice token in the type makes
-        // this a reference parameter.
-        const is_ref = std.mem.indexOf(u8, ty, "asterisk:") != null or
-            std.mem.indexOf(u8, ty, "l_bracket:") != null;
-        const is_fn = std.mem.indexOf(u8, ty, "keyword_fn:") != null;
-
-        if (is_fn) {
+        // Pointers and slices need no annotation. Hashing them by content is
+        // the only sound choice -- a pure function cannot observe an address --
+        // and that nobody mutates the referent behind the cache's back is part
+        // of what ///cache:pure already asserts.
+        if (std.mem.indexOf(u8, ty, "keyword_fn:") != null) {
             try report.err("{s}: parameter \"{s}\" is a function; it has no hashable content", .{ d.name, pname });
-        } else if (is_ref and !containsStr(d.deep.items, pname)) {
-            try report.err(
-                "{s}: parameter \"{s}\" is a reference type; add `///cache:deep {s}` to promise it is not mutated and may be hashed by content",
-                .{ d.name, pname, pname },
-            );
         }
     }
 }
@@ -362,9 +352,4 @@ fn checkBody(tree: Ast, decls: *const DeclMap, root: []const u8, d: Decl, report
             }
         }
     }
-}
-
-fn containsStr(haystack: []const []const u8, needle: []const u8) bool {
-    for (haystack) |h| if (std.mem.eql(u8, h, needle)) return true;
-    return false;
 }

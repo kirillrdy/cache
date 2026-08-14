@@ -31,8 +31,10 @@ pub fn slowFib(n: u64) u64 {
 /// Depends on sum, normalise, scale and Weights. All four are part of its
 /// cache identity, so editing any of them invalidates its entries.
 ///
+/// `xs` is a slice and needs no extra annotation: it is hashed by content,
+/// which is the only sound choice for a pure function.
+///
 ///cache:pure
-///cache:deep xs
 pub fn score(xs: []const f64, w: Weights) f64 {
     return normalise(sum(xs)) * w.alpha + @as(f64, @floatFromInt(xs.len)) * w.beta;
 }
