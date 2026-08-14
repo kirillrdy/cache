@@ -43,15 +43,33 @@ fn declName(comptime Container: type, comptime target: anytype) []const u8 {
     @compileError("zigcache: expected function identifier (.name, \"name\", or fn), got " ++ @typeName(T));
 }
 
+fn ReturnType(comptime Container: type, comptime target: anytype) type {
+    const name = declName(Container, target);
+    const f = @field(Container, name);
+    return @typeInfo(@TypeOf(f)).@"fn".return_type.?;
+}
+
 /// Binds a container scope and its source text, so each cached function costs one line.
 ///
 ///     const here = cache.Source(@This(), @embedFile("demo.zig"));
-///     const cachedScore = here.memo(.score);
+///     const cache = here.call;
+///     cache(.score, .{ xs, w });
 ///
 /// The identity is derived from that source at compile time, so there is no
 /// generated file to import and no build step to forget.
 pub fn Source(comptime Container: type, comptime source: []const u8) type {
     return struct {
+        /// Directly call the memoised form of `target` (.name, "name", or pub fn).
+        ///
+        ///     const cache = here.call;
+        ///     cache(.slowFib, .{34});
+        pub fn call(comptime target: anytype, args: anytype) ReturnType(Container, target) {
+            const name = comptime declName(Container, target);
+            const f = @field(Container, name);
+            const id_str = comptime identity.of(source, name);
+            return Memo(id_str, f).call(args);
+        }
+
         /// The memoised form of `target` (.name, "name", or pub fn), keyed on its source.
         pub fn memo(comptime target: anytype) @TypeOf(Memo("", @field(Container, declName(Container, target))).call) {
             const name = comptime declName(Container, target);
@@ -342,5 +360,12 @@ test "Source ergonomics: .symbol, string, and function" {
 
     const memo_dec_str = here.memo("dec");
     try testing.expectEqual(@as(u32, 9), memo_dec_str(.{10}));
+
+    // 4. Direct call via here.call or const cache = here.call
+    const cache = here.call;
+    try testing.expectEqual(@as(u32, 11), cache(.inc, .{10}));
+    try testing.expectEqual(@as(u32, 11), cache("inc", .{10}));
+    try testing.expectEqual(@as(u32, 11), cache(Mod.inc, .{10}));
+    try testing.expectEqual(@as(u32, 9), cache(.dec, .{10}));
 }
 
