@@ -38,11 +38,11 @@ meets `+0.0`, and the type name is part of the encoding so `u32(1)` ≠ `u64(1)`
 ```zig
 const cache = @import("cache");
 
-const here = cache.Source(@embedFile("demo.zig"));
+const here = cache.Source(@This(), @embedFile("demo.zig"));
 
 pub fn score(xs: []const f64, w: Weights) f64 { ... }
 
-const cachedScore = here.memo("score", score);
+const cachedScore = here.memo(.score);
 
 cachedScore(.{ xs, w });
 ```

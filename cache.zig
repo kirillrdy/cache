@@ -14,22 +14,54 @@ const std = @import("std");
 const identity = @import("identity.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// Binds a body of source, so each cached function costs one line.
+fn declName(comptime Container: type, comptime target: anytype) []const u8 {
+    const T = @TypeOf(target);
+    switch (@typeInfo(T)) {
+        .enum_literal, .@"enum" => return @tagName(target),
+        .pointer => |p| switch (p.size) {
+            .slice => if (p.child == u8) return target,
+            .one => switch (@typeInfo(p.child)) {
+                .array => |a| if (a.child == u8) return target,
+                else => {},
+            },
+            else => {},
+        },
+        .@"fn" => {
+            const info = @typeInfo(Container);
+            inline for (info.@"struct".decls) |decl| {
+                if (@hasDecl(Container, decl.name)) {
+                    const val = @field(Container, decl.name);
+                    if (@TypeOf(val) == T and val == target) {
+                        return decl.name;
+                    }
+                }
+            }
+            @compileError("zigcache: could not find public declaration matching function. Use .name or \"name\"");
+        },
+        else => {},
+    }
+    @compileError("zigcache: expected function identifier (.name, \"name\", or fn), got " ++ @typeName(T));
+}
+
+/// Binds a container scope and its source text, so each cached function costs one line.
 ///
-///     const here = cache.Source(@embedFile("demo.zig"));
-///     const cachedScore = here.memo("score", score);
+///     const here = cache.Source(@This(), @embedFile("demo.zig"));
+///     const cachedScore = here.memo(.score);
 ///
 /// The identity is derived from that source at compile time, so there is no
 /// generated file to import and no build step to forget.
-pub fn Source(comptime source: []const u8) type {
+pub fn Source(comptime Container: type, comptime source: []const u8) type {
     return struct {
-        /// The memoised form of `f`, keyed on the source of `name`.
-        pub fn memo(comptime name: []const u8, comptime f: anytype) @TypeOf(Memo("", f).call) {
+        /// The memoised form of `target` (.name, "name", or pub fn), keyed on its source.
+        pub fn memo(comptime target: anytype) @TypeOf(Memo("", @field(Container, declName(Container, target))).call) {
+            const name = comptime declName(Container, target);
+            const f = @field(Container, name);
             return Memo(identity.of(source, name), f).call;
         }
 
-        /// The cache identity of `name`, for display.
-        pub fn id(comptime name: []const u8) []const u8 {
+        /// The cache identity of `target` (.name, "name", or pub fn), for display.
+        pub fn id(comptime target: anytype) []const u8 {
+            const name = comptime declName(Container, target);
             return identity.of(source, name);
         }
     };
@@ -279,3 +311,36 @@ test "memo without a store still returns correct results" {
     }.double;
     try testing.expectEqual(@as(u32, 42), Memo("id", f).call(.{21}));
 }
+
+test "Source ergonomics: .symbol, string, and function" {
+    const Mod = struct {
+        pub fn inc(n: u32) u32 {
+            return n + 1;
+        }
+        fn dec(n: u32) u32 {
+            return n - 1;
+        }
+    };
+    const src = "pub fn inc(n: u32) u32 { return n + 1; } fn dec(n: u32) u32 { return n - 1; }";
+    const here = Source(Mod, src);
+
+    // 1. Enum literal / symbol
+    const memo_inc_sym = here.memo(.inc);
+    try testing.expectEqual(@as(u32, 11), memo_inc_sym(.{10}));
+
+    // 2. String
+    const memo_inc_str = here.memo("inc");
+    try testing.expectEqual(@as(u32, 11), memo_inc_str(.{10}));
+
+    // 3. Function value
+    const memo_inc_fn = here.memo(Mod.inc);
+    try testing.expectEqual(@as(u32, 11), memo_inc_fn(.{10}));
+
+    // Private function works with .symbol and string
+    const memo_dec_sym = here.memo(.dec);
+    try testing.expectEqual(@as(u32, 9), memo_dec_sym(.{10}));
+
+    const memo_dec_str = here.memo("dec");
+    try testing.expectEqual(@as(u32, 9), memo_dec_str(.{10}));
+}
+

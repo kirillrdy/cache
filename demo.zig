@@ -9,7 +9,7 @@ const std = @import("std");
 const cache = @import("cache");
 
 /// One binding for the whole file; each cached function then costs one line.
-const here = cache.Source(@embedFile("demo.zig"));
+const here = cache.Source(@This(), @embedFile("demo.zig"));
 
 // ------------------------------------------------------ the pure functions ---
 
@@ -54,8 +54,8 @@ fn normalise(v: f64) f64 {
 /// The checksum is derived from this file at compile time, covering each
 /// function and everything it transitively references. The originals stay
 /// callable and uncached.
-const cachedSlowFib = here.memo("slowFib", slowFib);
-const cachedScore = here.memo("score", score);
+const cachedSlowFib = here.memo(.slowFib);
+const cachedScore = here.memo(.score);
 
 // ----------------------------------------------------------------- main ---
 
@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     try cache.open(init.io, ".zigcache");
     defer cache.close();
 
-    std.debug.print("identities: slowFib={s} score={s}\n\n", .{ here.id("slowFib")[0..16], here.id("score")[0..16] });
+    std.debug.print("identities: slowFib={s} score={s}\n\n", .{ here.id(.slowFib)[0..16], here.id(.score)[0..16] });
 
     const w: Weights = .{ .alpha = 2, .beta = 0.5 };
     const xs: []const f64 = &.{ 1, 2, 3, 4, 5 };
