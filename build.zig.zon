@@ -7,7 +7,7 @@
         "build.zig",
         "build.zig.zon",
         "cache.zig",
-        "analyser.zig",
+        "identity.zig",
         "demo.zig",
         "impure.zig",
         "README.md",

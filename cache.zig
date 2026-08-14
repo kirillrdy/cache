@@ -1,7 +1,7 @@
 //! The runtime half of zigcache.
 //!
 //! `Memo(id, f).call` wraps any function in a memoised one. `id` is the
-//! checksum the analyser derived for `f`; the cache key is
+//! checksum derived for `f`; the cache key is
 //!
 //!     sha256( id || canonical encoding of the arguments )
 //!

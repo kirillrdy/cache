@@ -25,7 +25,6 @@ pub const Weights = struct {
 };
 
 /// Deliberately slow, so the cache has something to save.
-///cache:pure
 pub fn slowFib(n: u64) u64 {
     if (n < 2) return n;
     return slowFib(n - 1) + slowFib(n - 2);
@@ -36,8 +35,6 @@ pub fn slowFib(n: u64) u64 {
 ///
 /// `xs` is a slice and needs no extra annotation: it is hashed by content,
 /// which is the only sound choice for a pure function.
-///
-///cache:pure
 pub fn score(xs: []const f64, w: Weights) f64 {
     return normalise(sum(xs)) * w.alpha + @as(f64, @floatFromInt(xs.len)) * w.beta;
 }

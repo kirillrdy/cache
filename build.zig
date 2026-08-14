@@ -11,17 +11,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // The analyser: parses a source file, checksums each ///cache:pure
-    // function over its transitive dependencies, writes the ids out.
-    const analyser = b.addExecutable(.{
-        .name = "zigcache",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("analyser.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    b.installArtifact(analyser);
 
     // No codegen step: cache identities are derived at compile time from
     // @embedFile, so there is nothing to generate and nothing to wire in.

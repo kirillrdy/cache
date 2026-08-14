@@ -1,12 +1,6 @@
-//! Functions that claim `///cache:pure` but are not, and a `main` that shows
-//! why caching them would be wrong.
-//!
-//! Split by who is responsible for catching them. `///cache:pure` is a promise
-//! by the author; the analyser checks only what it can observe directly and
-//! takes the rest on trust.
+//! Impure functions, and a `main` that shows why caching them would be wrong.
 //!
 //!     zig build run-impure       # watch the answers change between calls
-//!     zig-out/bin/zigcache impure.zig    # exits 1 with 6 violations
 
 const std = @import("std");
 
@@ -15,18 +9,16 @@ var call_count: u64 = 0;
 const Buffer = struct { data: []u8 };
 
 // ---------------------------------------------------------------------------
-// Reported. These are direct observations, not judgements about other code.
+// Mutable state or argument invalidation
 // ---------------------------------------------------------------------------
 
 /// Reads and writes container-level state.
-///cache:pure
 pub fn counter(n: u64) u64 {
     call_count += 1;
     return n + call_count;
 }
 
 /// Same, reached only through a callee.
-///cache:pure
 pub fn sneaky(n: u64) u64 {
     return n + helper();
 }
@@ -37,40 +29,34 @@ fn helper() u64 {
 }
 
 /// A function value has no content to hash.
-///cache:pure
 pub fn applied(n: u64, f: *const fn (u64) u64) u64 {
     return f(n);
 }
 
-/// anytype: the analyser cannot know what will be passed.
-///cache:pure
+/// anytype: content is not knowable ahead of time.
 pub fn generic(x: anytype) usize {
     return @sizeOf(@TypeOf(x));
 }
 
 /// Consumes the thing it was handed, so a second call with "the same"
 /// argument is not the same call at all.
-///cache:pure
 pub fn clobber(b: *Buffer) usize {
     b.data = b.data[0..b.data.len -| 1];
     return b.data.len;
 }
 
 // ---------------------------------------------------------------------------
-// Not reported, by design. Each is impure, and each would need the analyser to
-// judge code it cannot see. `///cache:pure` here is simply a false promise.
+// Reaching the outside world
 //
-// Worth noting how visible these are in Zig anyway: reaching the outside world
-// mostly means taking an `Io`, so it shows up in the signature.
+// In Zig, reaching the outside world mostly means taking an `Io` or allocator,
+// so it is visible in the signature.
 // ---------------------------------------------------------------------------
 
-///cache:pure
 pub fn stamped(n: i64, io: std.Io) i64 {
     const now: std.Io.Clock.Timestamp = .now(io, .real);
     return n + @as(i64, @truncate(now.raw.nanoseconds));
 }
 
-///cache:pure
 pub fn logged(n: u64) u64 {
     std.debug.print("  (logged {d})\n", .{n});
     return n;

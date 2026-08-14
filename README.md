@@ -6,16 +6,14 @@ arguments.
 ```
 cache.zig      library: memo wrappers, comptime argument hashing, disk store
 identity.zig   library: transitive source checksum, computed at comptime
-analyser.zig   optional linter: reports observable purity violations
 demo.zig       example: pure functions, cached wrappers, and a main
-impure.zig     example: functions that falsely claim purity, and a main
+impure.zig     example: impure functions and a main
 ```
 
 ```sh
 zig build test                       # runtime tests
 zig build run                        # the caching demo; run it twice
 zig build run-impure                 # why the impure examples cannot be cached
-zig-out/bin/zigcache impure.zig      # optional linter; exits 1 with 5 violations
 ```
 
 ## The key
@@ -112,55 +110,40 @@ The second row matters most: the embedded source is the *whole file*, including
 `main` and the wrappers, yet an edit to `main` moves nothing. Granularity comes
 from the transitive closure, not from what was embedded.
 
-## `///cache:pure` is a promise, not a proof
+## Purity and correctness
 
-It is also, now, purely advisory. It used to gate id generation — without it
-you got no `ids.score` and the build broke. Since identities are derived at
-comptime from the source, `here.memo("score", score)` works whether or not the
-function carries the annotation. All it does today is tell the optional linter
-which functions to look at.
+The library requires no annotations or source directives. There is no allowlist
+of blessed namespaces or builtins either. Deciding whether `std.foo.bar` is pure
+is not something a syntactic pass can do, and guessing is worse than not guessing:
+a false positive blocks correct code, and a false negative reads as a guarantee
+that was never checked.
 
-Nothing verifies purity, and nothing in the runtime consumes it: `Memo` will
-happily cache a blatantly impure function if you hand it one. There is no
-allowlist of blessed namespaces or builtins either. Whether `std.foo.bar` is
-pure is not a question a syntactic pass can answer, and guessing is worse than
-not guessing in both directions: a false positive blocks correct code, and a
-false negative is the dangerous one — it reads as a guarantee that was never
-checked.
+Nothing verifies semantic purity at compile time: `Memo` will happily cache an
+impure function if you pass it one. What *is* verified at compile time via
+`@typeInfo` are structural guarantees:
+- arguments must be hashable by content (e.g. no `anytype`, no function pointers)
+- results must be self-contained (no pointers that would dangle across processes)
 
-So the annotation is the author's assertion. What the linter reports is only
-what it can observe directly, offered as a service rather than a gate:
+`impure.zig` demonstrates various forms of impurity — from container-level mutable
+state to wall-clock reads — and `zig build run-impure` shows why caching them yields
+stale or incorrect results.
 
-- reaching a container-level `var`, transitively through callees
-- mutating through a parameter, which contradicts the promise
-- parameters whose values cannot be hashed at all: `anytype` and function
-  parameters
-
-`impure.zig` is split along exactly that line -- five functions the linter
-catches, two it knowingly does not. `zig build run-impure` shows all of them
-returning different answers for the same arguments.
-
-Worth noting how visible impurity is in Zig anyway: reaching the outside world
-mostly means taking an `Io` or an allocator, so it shows up in the signature.
-A function that takes neither is already close to pure by construction.
+In Zig, reaching the outside world mostly means taking an `Io` or an allocator,
+which naturally surfaces in the function signature. A function taking neither is
+already close to pure by construction.
 
 ## Arguments
 
-There is deliberately no per-parameter opt-in for pointers and slices.
+There is deliberately no per-parameter configuration for pointers and slices.
 
 - **value types** (numbers, bools, enums, arrays, structs of those) — hashed
   as-is
 - **pointers and slices** — hashed by content, following the pointer. That is
   the only sound choice: a pure function cannot observe an address, so hashing
-  identity would be wrong in every case. And that nobody mutates the referent
-  behind the cache's back is already part of what `///cache:pure` asserts —
-  asking for the same promise twice is ceremony, not safety.
-- **`anytype`, function parameters** — rejected. No hashable content.
-
-An earlier version required `///cache:deep <names>` on every reference
-parameter. It was dropped for the same reason the namespace allowlists were: a
-directive that can only ever say one thing is not a decision, and re-stating a
-promise `///cache:pure` already covers does not make it any more true.
+  identity would be wrong in every case. And that caller code does not mutate
+  the referent behind the cache's back is part of what memoisation assumes.
+- **`anytype`, function parameters** — rejected at compile time (no hashable
+  content).
 
 ## The runtime is all comptime
 
@@ -195,11 +178,8 @@ produced different keys. The NaN test caught that.
   resolution, and `std.zig.Ast` is purely syntactic. `AstGen`/`Zir` is the
   compiler's own lowering rather than a name-resolution API you would want to
   drive from outside.
-- **Structural checks are token patterns.** `std.zig.Ast` has no generic walker
-  (no `ast.Inspect` equivalent), so `checkBody`'s mutation-through-parameter
-  check matches a token sequence rather than inspecting assignment nodes.
 - **Comptime cost.** Deriving identities runs a tokenizer and SHA-256 inside
-  the compiler, with `(2_000_000)`. Fine for a file this
+  the compiler, with `@setEvalBranchQuota(2_000_000)`. Fine for a file this
   size; a large file with many cached functions would want measuring.
 - **No eviction, no size bound, no TTL** on the disk store.
 
