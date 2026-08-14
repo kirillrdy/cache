@@ -4,13 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // The library. Depending packages get it as `@import("cache")`.
-    const cache_mod = b.addModule("cache", .{
-        .root_source_file = b.path("cache.zig"),
+    // The library. Depending packages get it as `@import("zimo")`.
+    const zimo_mod = b.addModule("zimo", .{
+        .root_source_file = b.path("zimo.zig"),
         .target = target,
         .optimize = optimize,
     });
-
 
     // No codegen step: cache identities are derived at compile time from
     // @embedFile, so there is nothing to generate and nothing to wire in.
@@ -19,7 +18,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    demo_mod.addImport("cache", cache_mod);
+    demo_mod.addImport("zimo", zimo_mod);
 
     const demo = b.addExecutable(.{ .name = "demo", .root_module = demo_mod });
     b.installArtifact(demo);
@@ -42,6 +41,6 @@ pub fn build(b: *std.Build) void {
     b.step("run-impure", "Show why the impure examples cannot be cached")
         .dependOn(&run_impure.step);
 
-    const tests = b.addTest(.{ .root_module = cache_mod });
+    const tests = b.addTest(.{ .root_module = zimo_mod });
     b.step("test", "Test the runtime").dependOn(&b.addRunArtifact(tests).step);
 }

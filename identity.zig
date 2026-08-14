@@ -55,7 +55,7 @@ pub fn of(comptime source: []const u8, comptime name: []const u8) []const u8 {
             for (d.refs) |r| wanted = wanted ++ [_][]const u8{r};
         }
 
-        if (units.len == 0) @compileError("zigcache: no container-level declaration named '" ++
+        if (units.len == 0) @compileError("zimo: no container-level declaration named '" ++
             name ++ "' in the given source");
 
         // Discovery order must not affect the key.

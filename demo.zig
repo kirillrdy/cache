@@ -1,7 +1,7 @@
 const std = @import("std");
-const cache = @import("cache");
+const zimo = @import("zimo");
 
-const here = cache.Source(@This(), @embedFile("demo.zig"));
+const here = zimo.bind(@This(), @embedFile("demo.zig"));
 
 const scale: f64 = 1000.0;
 
@@ -30,8 +30,8 @@ fn normalise(v: f64) f64 {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try cache.open(init.io, ".zigcache");
-    defer cache.close();
+    try zimo.open(init.io, ".zimo");
+    defer zimo.close();
 
     std.debug.print("identities: slowFib={s} score={s}\n\n", .{ here.id(.slowFib)[0..16], here.id(.score)[0..16] });
 
@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     t.report("score (copy)", here.call(.score, .{ copy, w }));
     t.report("score (changed)", here.call(.score, .{ changed, w }));
 
-    std.debug.print("\nhits={d} misses={d}\n", .{ cache.stats.hits, cache.stats.misses });
+    std.debug.print("\nhits={d} misses={d}\n", .{ zimo.stats.hits, zimo.stats.misses });
 }
 
 const Trace = struct {
@@ -60,16 +60,16 @@ const Trace = struct {
         return .{
             .io = io,
             .mark = .now(io, .awake),
-            .hits = cache.stats.hits,
+            .hits = zimo.stats.hits,
         };
     }
 
     fn report(t: *Trace, label: []const u8, value: anytype) void {
         const now: std.Io.Clock.Timestamp = .now(t.io, .awake);
         const us: u64 = @intCast(@max(0, t.mark.durationTo(now).raw.toMicroseconds()));
-        const status = if (cache.stats.hits > t.hits) "HIT " else "MISS";
+        const status = if (zimo.stats.hits > t.hits) "HIT " else "MISS";
         std.debug.print("{s: <18} {s} {d: >8}us -> {any}\n", .{ label, status, us, value });
-        t.hits = cache.stats.hits;
+        t.hits = zimo.stats.hits;
         t.mark = .now(t.io, .awake);
     }
 };

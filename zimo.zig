@@ -1,4 +1,4 @@
-//! The runtime half of zigcache.
+//! The runtime half of zimo.
 //!
 //! `Memo(id, f).call` wraps any function in a memoised one. `id` is the
 //! checksum derived for `f`; the cache key is
@@ -36,11 +36,11 @@ fn declName(comptime Container: type, comptime target: anytype) []const u8 {
                     }
                 }
             }
-            @compileError("zigcache: could not find public declaration matching function. Use .name or \"name\"");
+            @compileError("zimo: could not find public declaration matching function. Use .name or \"name\"");
         },
         else => {},
     }
-    @compileError("zigcache: expected function identifier (.name, \"name\", or fn), got " ++ @typeName(T));
+    @compileError("zimo: expected function identifier (.name, \"name\", or fn), got " ++ @typeName(T));
 }
 
 fn ReturnType(comptime Container: type, comptime target: anytype) type {
@@ -49,9 +49,11 @@ fn ReturnType(comptime Container: type, comptime target: anytype) type {
     return @typeInfo(@TypeOf(f)).@"fn".return_type.?;
 }
 
+pub const bind = Source;
+
 /// Binds a container scope and its source text, so each cached function costs one line.
 ///
-///     const here = cache.Source(@This(), @embedFile("demo.zig"));
+///     const here = zimo.bind(@This(), @embedFile("demo.zig"));
 ///     here.call(.score, .{ xs, w });
 ///
 /// The identity is derived from that source at compile time, so there is no
@@ -112,9 +114,9 @@ fn assertStorable(comptime T: type) void {
         .@"struct" => |s| for (s.fields) |f| assertStorable(f.type),
         .array => |a| assertStorable(a.child),
         .optional => |o| assertStorable(o.child),
-        .pointer => @compileError("zigcache: result type " ++ @typeName(T) ++
+        .pointer => @compileError("zimo: result type " ++ @typeName(T) ++
             " contains a pointer; a cached result must be self-contained"),
-        else => @compileError("zigcache: result type " ++ @typeName(T) ++ " cannot be stored"),
+        else => @compileError("zimo: result type " ++ @typeName(T) ++ " cannot be stored"),
     }
 }
 
@@ -176,7 +178,7 @@ fn hashValue(h: *Sha256, comptime T: type, v: T) void {
             // Contents, not address: identity is not observable to a pure
             // function, so hashing it would be wrong in every case.
             .one => {
-                if (@typeInfo(p.child) == .@"fn") @compileError("zigcache: cannot hash " ++
+                if (@typeInfo(p.child) == .@"fn") @compileError("zimo: cannot hash " ++
                     @typeName(T) ++ "; a function has no content a pure function could depend on");
                 hashValue(h, p.child, v.*);
             },
@@ -190,10 +192,10 @@ fn hashValue(h: *Sha256, comptime T: type, v: T) void {
                     for (v) |elem| hashValue(h, p.child, elem);
                 }
             },
-            .many, .c => @compileError("zigcache: cannot hash " ++ @typeName(T) ++
+            .many, .c => @compileError("zimo: cannot hash " ++ @typeName(T) ++
                 "; its length is not known"),
         },
-        else => @compileError("zigcache: cannot hash " ++ @typeName(T) ++
+        else => @compileError("zimo: cannot hash " ++ @typeName(T) ++
             "; it has no content a pure function could depend on"),
     }
 }

@@ -1,12 +1,12 @@
 .{
-    .name = .zigcache,
+    .name = .zimo,
     .version = "0.1.0",
-    .fingerprint = 0xd408f81fc405f2b7,
+    .fingerprint = 0x6f9e0668843f5ed3,
     .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "cache.zig",
+        "zimo.zig",
         "identity.zig",
         "demo.zig",
         "impure.zig",

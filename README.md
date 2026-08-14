@@ -1,10 +1,10 @@
-# zigcache
+# zimo
 
 Function-call caching keyed on a checksum of the function's source and its
 arguments.
 
 ```
-cache.zig      library: memo wrappers, comptime argument hashing, disk store
+zimo.zig       library: memo wrappers, comptime argument hashing, disk store
 identity.zig   library: transitive source checksum, computed at comptime
 demo.zig       example: pure functions, cached wrappers, and a main
 impure.zig     example: impure functions and a main
@@ -37,9 +37,9 @@ meets `+0.0`, and the type name is part of the encoding so `u32(1)` ≠ `u64(1)`
 
 ```zig
 const std = @import("std");
-const cache = @import("cache");
+const zimo = @import("zimo");
 
-const here = cache.Source(@This(), @embedFile("demo.zig"));
+const here = zimo.bind(@This(), @embedFile("demo.zig"));
 
 pub fn score(xs: []const f64, w: Weights) f64 { ... }
 
@@ -151,8 +151,8 @@ time. There is no runtime reflection and no encoder, and a type that cannot be
 cached is a compile error at the `Memo` call site:
 
 ```
-error: zigcache: result type []const u8 contains a pointer; a cached result must be self-contained
-error: zigcache: cannot hash *const fn (u32) u32; a function has no content a pure function could depend on
+error: zimo: result type []const u8 contains a pointer; a cached result must be self-contained
+error: zimo: cannot hash *const fn (u32) u32; a function has no content a pure function could depend on
 ```
 
 One wrinkle worth recording: structs are hashed *structurally* — field count,
