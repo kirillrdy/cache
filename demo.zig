@@ -332,9 +332,8 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Loaded inputs/bus.jpg ({d}x{d}, {d} bytes)\n\n", .{ bus_image.width, bus_image.height, bus_image.pixels.len });
 
-    const bus_res = here.call(.detectObjects, .{ bus_image, 0.40 });
-
     var t = Trace.start(init.io);
+    const bus_res = here.call(.detectObjects, .{ bus_image, 0.40 });
     t.report("detectObjects(bus, 0.40)", bus_res);
     t.report("detectObjects(bus, 0.40)", here.call(.detectObjects, .{ bus_image, 0.40 }));
     t.report("detectObjects(bus, 0.60)", here.call(.detectObjects, .{ bus_image, 0.60 }));
