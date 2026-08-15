@@ -36,48 +36,27 @@ pub const Detection = struct {
     y2: f32,
 };
 
-pub const AnnotatedImage = struct {
-    width: u32,
-    height: u32,
-    num_detections: u32 = 0,
-    detections: [16]Detection = undefined,
-};
-
-pub fn detectObjects(image: Image, min_confidence: f32) AnnotatedImage {
-    var result: AnnotatedImage = .{
-        .width = image.width,
-        .height = image.height,
-        .num_detections = 0,
-        .detections = [_]Detection{.{
-            .class_id = 0,
-            .confidence = 0,
-            .x1 = 0,
-            .y1 = 0,
-            .x2 = 0,
-            .y2 = 0,
-        }} ** 16,
-    };
-
+pub fn detectObjects(image: Image, min_confidence: f32) []Detection {
     const api_base = c.OrtGetApiBase();
-    if (api_base == null) return result;
+    if (api_base == null) return &.{};
     const api = api_base.*.GetApi.?(c.ORT_API_VERSION);
-    if (api == null) return result;
+    if (api == null) return &.{};
 
     var env: ?*c.OrtEnv = null;
-    if (api.*.CreateEnv.?(c.ORT_LOGGING_LEVEL_WARNING, "yolo_env", &env) != null) return result;
+    if (api.*.CreateEnv.?(c.ORT_LOGGING_LEVEL_WARNING, "yolo_env", &env) != null) return &.{};
     defer api.*.ReleaseEnv.?(env);
 
     var session_options: ?*c.OrtSessionOptions = null;
-    if (api.*.CreateSessionOptions.?(&session_options) != null) return result;
+    if (api.*.CreateSessionOptions.?(&session_options) != null) return &.{};
     defer api.*.ReleaseSessionOptions.?(session_options);
 
     var session: ?*c.OrtSession = null;
     const model_path = "models/yolov8n.onnx";
-    if (api.*.CreateSession.?(env, model_path, session_options, &session) != null) return result;
+    if (api.*.CreateSession.?(env, model_path, session_options, &session) != null) return &.{};
     defer api.*.ReleaseSession.?(session);
 
     var mem_info: ?*c.OrtMemoryInfo = null;
-    if (api.*.CreateCpuMemoryInfo.?(c.OrtArenaAllocator, c.OrtMemTypeDefault, &mem_info) != null) return result;
+    if (api.*.CreateCpuMemoryInfo.?(c.OrtArenaAllocator, c.OrtMemTypeDefault, &mem_info) != null) return &.{};
     defer api.*.ReleaseMemoryInfo.?(mem_info);
 
     const model_w = 640;
@@ -114,7 +93,7 @@ pub fn detectObjects(image: Image, min_confidence: f32) AnnotatedImage {
         4,
         c.ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
         &input_tensor,
-    ) != null) return result;
+    ) != null) return &.{};
     defer api.*.ReleaseValue.?(input_tensor);
 
     const input_names = [_][*:0]const u8{"images"};
@@ -130,11 +109,11 @@ pub fn detectObjects(image: Image, min_confidence: f32) AnnotatedImage {
         &output_names,
         1,
         &output_tensor,
-    ) != null) return result;
+    ) != null) return &.{};
     defer api.*.ReleaseValue.?(output_tensor);
 
     var output_data: [*]f32 = undefined;
-    if (api.*.GetTensorMutableData.?(output_tensor, @ptrCast(&output_data)) != null) return result;
+    if (api.*.GetTensorMutableData.?(output_tensor, @ptrCast(&output_data)) != null) return &.{};
 
     const num_anchors = 8400;
     const num_classes = 80;
@@ -199,24 +178,27 @@ pub fn detectObjects(image: Image, min_confidence: f32) AnnotatedImage {
 
     // Non-maximum suppression (NMS) with IoU threshold 0.45
     var count: u32 = 0;
+    var selected: [16]Detection = undefined;
     for (0..candidate_count) |i| {
         if (count >= 16) break;
         const cand = candidates[i];
         var keep = true;
         for (0..count) |j| {
-            if (result.detections[j].class_id == cand.class_id and iou(result.detections[j], cand) > 0.45) {
+            if (selected[j].class_id == cand.class_id and iou(selected[j], cand) > 0.45) {
                 keep = false;
                 break;
             }
         }
         if (keep) {
-            result.detections[count] = cand;
+            selected[count] = cand;
             count += 1;
         }
     }
-    result.num_detections = count;
 
-    return result;
+    if (count == 0) return &.{};
+    const out = std.heap.page_allocator.alloc(Detection, count) catch return &.{};
+    @memcpy(out, selected[0..count]);
+    return out;
 }
 
 fn iou(a: Detection, b: Detection) f32 {
@@ -256,7 +238,7 @@ fn loadJpeg(allocator: std.mem.Allocator, bytes: []const u8) !Image {
     };
 }
 
-fn saveAnnotatedJpeg(allocator: std.mem.Allocator, io: std.Io, path: []const u8, image: Image, annotated: AnnotatedImage) !void {
+fn saveAnnotatedJpeg(allocator: std.mem.Allocator, io: std.Io, path: []const u8, image: Image, detections: []const Detection) !void {
     const total_pixels = image.width * image.height;
     const rgb_slice = try allocator.alloc(zigimg.color.Rgb24, total_pixels);
     defer allocator.free(rgb_slice);
@@ -269,8 +251,7 @@ fn saveAnnotatedJpeg(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         };
     }
 
-    for (0..annotated.num_detections) |i| {
-        const d = annotated.detections[i];
+    for (detections) |d| {
         const color: zigimg.color.Rgb24 = if (d.class_id == 0)
             .{ .r = 0, .g = 255, .b = 0 } // green for person
         else if (d.class_id == 5)
@@ -369,17 +350,16 @@ const Trace = struct {
         };
     }
 
-    fn report(t: *Trace, label: []const u8, value: AnnotatedImage) void {
+    fn report(t: *Trace, label: []const u8, detections: []const Detection) void {
         const now: std.Io.Clock.Timestamp = .now(t.io, .awake);
         const us: u64 = @intCast(@max(0, t.mark.durationTo(now).raw.toMicroseconds()));
         const status = if (zimo.stats.hits > t.hits) "HIT " else "MISS";
         var dur_buf: [16]u8 = undefined;
         const dur_str = formatDuration(&dur_buf, us);
-        std.debug.print("{s: <30} {s} {s: >9} -> {d} detections\n", .{ label, status, dur_str, value.num_detections });
-        for (0..value.num_detections) |i| {
-            const d = value.detections[i];
+        std.debug.print("{s: <30} {s} {s: >9} -> {d} detections\n", .{ label, status, dur_str, detections.len });
+        for (detections, 1..) |d, i| {
             std.debug.print("   [{d}] {s: <12} ({d:.0}%) box=[{d:.0}, {d:.0}, {d:.0}, {d:.0}]\n", .{
-                i + 1,
+                i,
                 CLASS_NAMES[d.class_id],
                 d.confidence * 100.0,
                 d.x1,
@@ -392,3 +372,4 @@ const Trace = struct {
         t.mark = .now(t.io, .awake);
     }
 };
+

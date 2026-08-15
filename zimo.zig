@@ -114,8 +114,11 @@ fn assertStorable(comptime T: type) void {
         .@"struct" => |s| for (s.fields) |f| assertStorable(f.type),
         .array => |a| assertStorable(a.child),
         .optional => |o| assertStorable(o.child),
-        .pointer => @compileError("zimo: result type " ++ @typeName(T) ++
-            " contains a pointer; a cached result must be self-contained"),
+        .pointer => |p| switch (p.size) {
+            .slice => assertStorable(p.child),
+            else => @compileError("zimo: result type " ++ @typeName(T) ++
+                " contains a pointer; a cached result must be self-contained"),
+        },
         else => @compileError("zimo: result type " ++ @typeName(T) ++ " cannot be stored"),
     }
 }
@@ -252,23 +255,61 @@ fn get(comptime R: type, key: [64]u8) ?R {
     const io = g_io orelse return null;
     const dir = g_dir orelse return null;
 
-    var buf: [@sizeOf(R)]u8 = undefined;
-    const n = dir.readFileAlloc(io, &key, std.heap.page_allocator, .limited(@sizeOf(R) + 1)) catch return null;
-    defer std.heap.page_allocator.free(n);
-    if (n.len != @sizeOf(R)) return null;
-    @memcpy(&buf, n);
-    return std.mem.bytesToValue(R, &buf);
+    switch (@typeInfo(R)) {
+        .pointer => |p| switch (p.size) {
+            .slice => {
+                const Elem = p.child;
+                const n = dir.readFileAlloc(io, &key, std.heap.page_allocator, .limited(64 * 1024 * 1024)) catch return null;
+                if (n.len % @sizeOf(Elem) != 0) {
+                    std.heap.page_allocator.free(n);
+                    return null;
+                }
+                const count = n.len / @sizeOf(Elem);
+                if (count == 0) {
+                    std.heap.page_allocator.free(n);
+                    return &.{};
+                }
+                const out = std.heap.page_allocator.alloc(Elem, count) catch {
+                    std.heap.page_allocator.free(n);
+                    return null;
+                };
+                @memcpy(std.mem.sliceAsBytes(out), n);
+                std.heap.page_allocator.free(n);
+                return out;
+            },
+            else => return null,
+        },
+        else => {
+            var buf: [@sizeOf(R)]u8 = undefined;
+            const n = dir.readFileAlloc(io, &key, std.heap.page_allocator, .limited(@sizeOf(R) + 1)) catch return null;
+            defer std.heap.page_allocator.free(n);
+            if (n.len != @sizeOf(R)) return null;
+            @memcpy(&buf, n);
+            return std.mem.bytesToValue(R, &buf);
+        },
+    }
 }
 
 fn put(comptime R: type, key: [64]u8, value: R) void {
     const io = g_io orelse return;
     const dir = g_dir orelse return;
 
-    // Zeroed first so struct padding never reaches the file as undefined
-    // memory.
-    var buf: [@sizeOf(R)]u8 = @splat(0);
-    @memcpy(&buf, std.mem.asBytes(&value));
-    dir.writeFile(io, .{ .sub_path = &key, .data = &buf }) catch {};
+    switch (@typeInfo(R)) {
+        .pointer => |p| switch (p.size) {
+            .slice => {
+                const bytes = std.mem.sliceAsBytes(value);
+                dir.writeFile(io, .{ .sub_path = &key, .data = bytes }) catch {};
+            },
+            else => {},
+        },
+        else => {
+            // Zeroed first so struct padding never reaches the file as undefined
+            // memory.
+            var buf: [@sizeOf(R)]u8 = @splat(0);
+            @memcpy(&buf, std.mem.asBytes(&value));
+            dir.writeFile(io, .{ .sub_path = &key, .data = &buf }) catch {};
+        },
+    }
 }
 
 // --------------------------------------------------------------- tests ---
@@ -374,4 +415,29 @@ test "Source ergonomics: .symbol, string, and function" {
     try testing.expectEqual(@as(u32, 11), cache(Mod.inc, .{10}));
     try testing.expectEqual(@as(u32, 9), cache(.dec, .{10}));
 }
+
+test "slice return type" {
+    const Mod = struct {
+        pub fn filterEvens(arr: []const u32) []const u32 {
+            var count: usize = 0;
+            for (arr) |x| {
+                if (x % 2 == 0) count += 1;
+            }
+            const buf = std.heap.page_allocator.alloc(u32, count) catch return &.{};
+            var idx: usize = 0;
+            for (arr) |x| {
+                if (x % 2 == 0) {
+                    buf[idx] = x;
+                    idx += 1;
+                }
+            }
+            return buf;
+        }
+    };
+    const here = Source(Mod, "pub fn filterEvens(arr: []const u32) []const u32 { ... }");
+    const input: []const u32 = &.{ 1, 2, 3, 4, 5, 6 };
+    const res = here.call(.filterEvens, .{input});
+    try testing.expectEqualSlices(u32, &.{ 2, 4, 6 }, res);
+}
+
 
