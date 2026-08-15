@@ -1,8 +1,12 @@
 # Zig build artifacts
 .zig-cache/
 zig-out/
+zig-pkg/
 
 # on-disk cache written by the demo
 .zigcache/
 .zimo/
+
+# generated outputs
+inputs/*_annotated.jpg
 
