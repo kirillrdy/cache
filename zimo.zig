@@ -173,7 +173,13 @@ fn hashValue(h: *Sha256, comptime T: type, v: T) void {
                 hashValue(h, @typeInfo(T).optional.child, inner);
             } else h.update(&[_]u8{0});
         },
-        .array => |a| for (v) |elem| hashValue(h, a.child, elem),
+        .array => |a| {
+            if (a.child == u8) {
+                h.update(&v);
+            } else {
+                for (v) |elem| hashValue(h, a.child, elem);
+            }
+        },
         .pointer => |p| switch (p.size) {
             // Contents, not address: identity is not observable to a pure
             // function, so hashing it would be wrong in every case.

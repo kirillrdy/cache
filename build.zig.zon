@@ -1,6 +1,12 @@
 .{
     .name = .zimo,
     .version = "0.1.0",
+    .dependencies = .{
+        .zigimg = .{
+            .url = "git+https://github.com/zigimg/zigimg#096115a3eeae1a4c477496d575f1f1f74865387c",
+            .hash = "zigimg-0.1.0-8_eo2mHBFwDLhWjXriR17_b7VF6qML1f98Xokp7ZZbop",
+        },
+    },
     .fingerprint = 0x6f9e0668843f5ed3,
     .minimum_zig_version = "0.16.0",
     .paths = .{
