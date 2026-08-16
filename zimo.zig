@@ -129,6 +129,11 @@ fn assertStorable(comptime T: type) void {
 /// Canonical encoding of a value: two values hash the same exactly when a pure
 /// function cannot tell them apart.
 fn hashValue(h: *Sha256, comptime T: type, v: T) void {
+    if (T == std.mem.Allocator) {
+        h.update("std.mem.Allocator");
+        return;
+    }
+
     switch (@typeInfo(T)) {
         // A struct is hashed structurally -- field names and field types --
         // rather than by @typeName. For an anonymous tuple holding
@@ -420,14 +425,14 @@ test "Source ergonomics: .symbol, string, and function" {
     try testing.expectEqual(@as(u32, 9), cache(.dec, .{10}));
 }
 
-test "slice return type" {
+test "slice return type with allocator parameter" {
     const Mod = struct {
-        pub fn filterEvens(arr: []const u32) []const u32 {
+        pub fn filterEvens(allocator: std.mem.Allocator, arr: []const u32) []const u32 {
             var count: usize = 0;
             for (arr) |x| {
                 if (x % 2 == 0) count += 1;
             }
-            const buf = testing.allocator.alloc(u32, count) catch return &.{};
+            const buf = allocator.alloc(u32, count) catch return &.{};
             var idx: usize = 0;
             for (arr) |x| {
                 if (x % 2 == 0) {
@@ -438,9 +443,9 @@ test "slice return type" {
             return buf;
         }
     };
-    const here = Source(Mod, "pub fn filterEvens(arr: []const u32) []const u32 { ... }");
+    const here = Source(Mod, "pub fn filterEvens(allocator: std.mem.Allocator, arr: []const u32) []const u32 { ... }");
     const input: []const u32 = &.{ 1, 2, 3, 4, 5, 6 };
-    const res = here.call(.filterEvens, .{input});
+    const res = here.call(.filterEvens, .{ testing.allocator, input });
     defer testing.allocator.free(res);
     try testing.expectEqualSlices(u32, &.{ 2, 4, 6 }, res);
 }

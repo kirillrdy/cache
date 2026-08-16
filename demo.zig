@@ -36,7 +36,7 @@ pub const Detection = struct {
     y2: f32,
 };
 
-pub fn detectObjects(image: Image, min_confidence: f32) []Detection {
+pub fn detectObjects(allocator: std.mem.Allocator, image: Image, min_confidence: f32) []Detection {
     const api_base = c.OrtGetApiBase();
     if (api_base == null) return &.{};
     const api = api_base.*.GetApi.?(c.ORT_API_VERSION);
@@ -160,45 +160,30 @@ pub fn detectObjects(image: Image, min_confidence: f32) []Detection {
     }
 
     // Sort candidates descending by confidence
-    var a_idx: usize = 0;
-    while (a_idx < candidate_count) : (a_idx += 1) {
-        var max_pos = a_idx;
-        var b_idx = a_idx + 1;
-        while (b_idx < candidate_count) : (b_idx += 1) {
-            if (candidates[b_idx].confidence > candidates[max_pos].confidence) {
-                max_pos = b_idx;
-            }
+    std.mem.sort(Detection, candidates[0..candidate_count], {}, struct {
+        fn desc(_: void, a: Detection, b: Detection) bool {
+            return a.confidence > b.confidence;
         }
-        if (max_pos != a_idx) {
-            const tmp = candidates[a_idx];
-            candidates[a_idx] = candidates[max_pos];
-            candidates[max_pos] = tmp;
-        }
-    }
+    }.desc);
 
     // Non-maximum suppression (NMS) with IoU threshold 0.45
-    var count: u32 = 0;
-    var selected: [16]Detection = undefined;
-    for (0..candidate_count) |i| {
+    var count: usize = 0;
+    for (candidates[0..candidate_count]) |cand| {
         if (count >= 16) break;
-        const cand = candidates[i];
         var keep = true;
-        for (0..count) |j| {
-            if (selected[j].class_id == cand.class_id and iou(selected[j], cand) > 0.45) {
+        for (candidates[0..count]) |sel| {
+            if (sel.class_id == cand.class_id and iou(sel, cand) > 0.45) {
                 keep = false;
                 break;
             }
         }
         if (keep) {
-            selected[count] = cand;
+            candidates[count] = cand;
             count += 1;
         }
     }
 
-    if (count == 0) return &.{};
-    const out = g_gpa.alloc(Detection, count) catch return &.{};
-    @memcpy(out, selected[0..count]);
-    return out;
+    return allocator.dupe(Detection, candidates[0..count]) catch &.{};
 }
 
 fn iou(a: Detection, b: Detection) f32 {
@@ -301,10 +286,7 @@ fn drawBoxRgb24(pixels: []zigimg.color.Rgb24, width: u32, height: u32, x1_in: i3
     }
 }
 
-var g_gpa: std.mem.Allocator = undefined;
-
 pub fn main(init: std.process.Init) !void {
-    g_gpa = init.gpa;
     try zimo.open(init.gpa, init.io, ".zimo");
     defer zimo.close();
 
@@ -316,15 +298,15 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Loaded inputs/bus.jpg ({d}x{d}, {d} bytes)\n\n", .{ bus_image.width, bus_image.height, bus_image.pixels.len });
 
     var t = Trace.start(init.io);
-    const bus_res = here.call(.detectObjects, .{ bus_image, 0.40 });
+    const bus_res = here.call(.detectObjects, .{ init.gpa, bus_image, 0.40 });
     defer init.gpa.free(bus_res);
     t.report("detectObjects(bus, 0.40)", bus_res);
 
-    const res2 = here.call(.detectObjects, .{ bus_image, 0.40 });
+    const res2 = here.call(.detectObjects, .{ init.gpa, bus_image, 0.40 });
     defer init.gpa.free(res2);
     t.report("detectObjects(bus, 0.40)", res2);
 
-    const res3 = here.call(.detectObjects, .{ bus_image, 0.60 });
+    const res3 = here.call(.detectObjects, .{ init.gpa, bus_image, 0.60 });
     defer init.gpa.free(res3);
     t.report("detectObjects(bus, 0.60)", res3);
 
