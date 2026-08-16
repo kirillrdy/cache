@@ -196,7 +196,7 @@ pub fn detectObjects(image: Image, min_confidence: f32) []Detection {
     }
 
     if (count == 0) return &.{};
-    const out = std.heap.page_allocator.alloc(Detection, count) catch return &.{};
+    const out = g_gpa.alloc(Detection, count) catch return &.{};
     @memcpy(out, selected[0..count]);
     return out;
 }
@@ -301,25 +301,34 @@ fn drawBoxRgb24(pixels: []zigimg.color.Rgb24, width: u32, height: u32, x1_in: i3
     }
 }
 
+var g_gpa: std.mem.Allocator = undefined;
+
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.page_allocator;
-    try zimo.open(init.io, ".zimo");
+    g_gpa = init.gpa;
+    try zimo.open(init.gpa, init.io, ".zimo");
     defer zimo.close();
 
     std.debug.print("identity: detectObjects={s}\n\n", .{here.id(.detectObjects)[0..16]});
 
-    const bus_image = try loadJpeg(allocator, bus_jpg);
-    defer allocator.free(bus_image.pixels);
+    const bus_image = try loadJpeg(init.gpa, bus_jpg);
+    defer init.gpa.free(bus_image.pixels);
 
     std.debug.print("Loaded inputs/bus.jpg ({d}x{d}, {d} bytes)\n\n", .{ bus_image.width, bus_image.height, bus_image.pixels.len });
 
     var t = Trace.start(init.io);
     const bus_res = here.call(.detectObjects, .{ bus_image, 0.40 });
+    defer init.gpa.free(bus_res);
     t.report("detectObjects(bus, 0.40)", bus_res);
-    t.report("detectObjects(bus, 0.40)", here.call(.detectObjects, .{ bus_image, 0.40 }));
-    t.report("detectObjects(bus, 0.60)", here.call(.detectObjects, .{ bus_image, 0.60 }));
 
-    try saveAnnotatedJpeg(allocator, init.io, "inputs/bus_annotated.jpg", bus_image, bus_res);
+    const res2 = here.call(.detectObjects, .{ bus_image, 0.40 });
+    defer init.gpa.free(res2);
+    t.report("detectObjects(bus, 0.40)", res2);
+
+    const res3 = here.call(.detectObjects, .{ bus_image, 0.60 });
+    defer init.gpa.free(res3);
+    t.report("detectObjects(bus, 0.60)", res3);
+
+    try saveAnnotatedJpeg(init.gpa, init.io, "inputs/bus_annotated.jpg", bus_image, bus_res);
 
     std.debug.print("\nhits={d} misses={d}\n", .{ zimo.stats.hits, zimo.stats.misses });
     std.debug.print("Saved annotated image to inputs/bus_annotated.jpg\n", .{});

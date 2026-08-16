@@ -88,20 +88,23 @@ pub fn Source(comptime Container: type, comptime source: []const u8) type {
 pub const Stats = struct { hits: usize = 0, misses: usize = 0 };
 pub var stats: Stats = .{};
 
+var g_allocator: ?std.mem.Allocator = null;
 var g_io: ?std.Io = null;
 var g_dir: ?std.Io.Dir = null;
 
 /// Point the cache at a directory. Entries survive across processes.
-pub fn open(io: std.Io, path: []const u8) !void {
+pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
     g_dir = try cwd.createDirPathOpen(io, path, .{});
     g_io = io;
+    g_allocator = allocator;
 }
 
 pub fn close() void {
     if (g_dir) |*d| d.close(g_io.?);
     g_dir = null;
     g_io = null;
+    g_allocator = null;
 }
 
 // ------------------------------------------------------------ comptime ---
@@ -254,35 +257,36 @@ pub fn Memo(comptime id: []const u8, comptime f: anytype) type {
 fn get(comptime R: type, key: [64]u8) ?R {
     const io = g_io orelse return null;
     const dir = g_dir orelse return null;
+    const allocator = g_allocator orelse return null;
 
     switch (@typeInfo(R)) {
         .pointer => |p| switch (p.size) {
             .slice => {
                 const Elem = p.child;
-                const n = dir.readFileAlloc(io, &key, std.heap.page_allocator, .limited(64 * 1024 * 1024)) catch return null;
+                const n = dir.readFileAlloc(io, &key, allocator, .limited(64 * 1024 * 1024)) catch return null;
                 if (n.len % @sizeOf(Elem) != 0) {
-                    std.heap.page_allocator.free(n);
+                    allocator.free(n);
                     return null;
                 }
                 const count = n.len / @sizeOf(Elem);
                 if (count == 0) {
-                    std.heap.page_allocator.free(n);
+                    allocator.free(n);
                     return &.{};
                 }
-                const out = std.heap.page_allocator.alloc(Elem, count) catch {
-                    std.heap.page_allocator.free(n);
+                const out = allocator.alloc(Elem, count) catch {
+                    allocator.free(n);
                     return null;
                 };
                 @memcpy(std.mem.sliceAsBytes(out), n);
-                std.heap.page_allocator.free(n);
+                allocator.free(n);
                 return out;
             },
             else => return null,
         },
         else => {
             var buf: [@sizeOf(R)]u8 = undefined;
-            const n = dir.readFileAlloc(io, &key, std.heap.page_allocator, .limited(@sizeOf(R) + 1)) catch return null;
-            defer std.heap.page_allocator.free(n);
+            const n = dir.readFileAlloc(io, &key, allocator, .limited(@sizeOf(R) + 1)) catch return null;
+            defer allocator.free(n);
             if (n.len != @sizeOf(R)) return null;
             @memcpy(&buf, n);
             return std.mem.bytesToValue(R, &buf);
@@ -423,7 +427,7 @@ test "slice return type" {
             for (arr) |x| {
                 if (x % 2 == 0) count += 1;
             }
-            const buf = std.heap.page_allocator.alloc(u32, count) catch return &.{};
+            const buf = testing.allocator.alloc(u32, count) catch return &.{};
             var idx: usize = 0;
             for (arr) |x| {
                 if (x % 2 == 0) {
@@ -437,6 +441,7 @@ test "slice return type" {
     const here = Source(Mod, "pub fn filterEvens(arr: []const u32) []const u32 { ... }");
     const input: []const u32 = &.{ 1, 2, 3, 4, 5, 6 };
     const res = here.call(.filterEvens, .{input});
+    defer testing.allocator.free(res);
     try testing.expectEqualSlices(u32, &.{ 2, 4, 6 }, res);
 }
 
