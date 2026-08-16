@@ -33,6 +33,26 @@ pub fn build(b: *std.Build) void {
     const demo = b.addExecutable(.{ .name = "demo", .root_module = demo_mod });
     b.installArtifact(demo);
 
+    // Download Tiny YOLOv3 ONNX model from official ONNX Model Zoo (github.com/onnx/models)
+    const download_model = b.addSystemCommand(&.{
+        "curl",
+        "-sL",
+        "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/object_detection_segmentation/tiny-yolov3/model/tiny-yolov3-11.onnx",
+    });
+    const model_onnx = download_model.addPrefixedOutputFileArg("-o", "tiny-yolov3-11.onnx");
+    const install_model = b.addInstallFile(model_onnx, "models/tiny-yolov3-11.onnx");
+    b.getInstallStep().dependOn(&install_model.step);
+
+    // Download test image (street.jpg) via build system into zig-out/images/
+    const download_img = b.addSystemCommand(&.{
+        "curl",
+        "-sL",
+        "https://upload.wikimedia.org/wikipedia/commons/c/c5/Tokyo_Shibuya_Scramble_Crossing_2018-10-09.jpg",
+    });
+    const street_jpg = download_img.addPrefixedOutputFileArg("-o", "street.jpg");
+    const install_img = b.addInstallFile(street_jpg, "images/street.jpg");
+    b.getInstallStep().dependOn(&install_img.step);
+
     const run_demo = b.addRunArtifact(demo);
     run_demo.step.dependOn(b.getInstallStep());
     b.step("run", "Run the caching demo").dependOn(&run_demo.step);

@@ -8,8 +8,6 @@ const c = @cImport({
 
 const here = zimo.bind(@This(), @embedFile("demo.zig"));
 
-pub const bus_jpg = @embedFile("inputs/bus.jpg");
-
 pub const CLASS_NAMES = [_][]const u8{
     "person",       "bicycle",   "car",           "motorcycle", "airplane",     "bus",            "train",      "truck",      "boat",          "traffic light",
     "fire hydrant", "stop sign", "parking meter", "bench",      "bird",         "cat",            "dog",        "horse",      "sheep",         "cow",
@@ -51,7 +49,7 @@ pub fn detectObjects(allocator: std.mem.Allocator, image: Image, min_confidence:
     defer api.*.ReleaseSessionOptions.?(session_options);
 
     var session: ?*c.OrtSession = null;
-    const model_path = "models/yolov8n.onnx";
+    const model_path = "zig-out/models/tiny-yolov3-11.onnx";
     if (api.*.CreateSession.?(env, model_path, session_options, &session) != null) return &.{};
     defer api.*.ReleaseSession.?(session);
 
@@ -59,19 +57,28 @@ pub fn detectObjects(allocator: std.mem.Allocator, image: Image, min_confidence:
     if (api.*.CreateCpuMemoryInfo.?(c.OrtArenaAllocator, c.OrtMemTypeDefault, &mem_info) != null) return &.{};
     defer api.*.ReleaseMemoryInfo.?(mem_info);
 
-    const model_w = 640;
-    const model_h = 640;
+    const model_w: usize = 416;
+    const model_h: usize = 416;
     const input_tensor_size = 1 * 3 * model_h * model_w;
     var input_data: [input_tensor_size]f32 = undefined;
+    @memset(&input_data, 128.0 / 255.0);
 
     const orig_w = image.width;
     const orig_h = image.height;
 
-    // Preprocess: sample/resize input RGB image into 640x640 float32 NCHW tensor
-    for (0..model_h) |my| {
-        const sy = (my * orig_h) / model_h;
-        for (0..model_w) |mx| {
-            const sx = (mx * orig_w) / model_w;
+    // Preprocess: letterbox resize input RGB image into 416x416 float32 NCHW tensor
+    const scale = @min(@as(f32, @floatFromInt(model_w)) / @as(f32, @floatFromInt(orig_w)), @as(f32, @floatFromInt(model_h)) / @as(f32, @floatFromInt(orig_h)));
+    const nw: usize = @intFromFloat(@as(f32, @floatFromInt(orig_w)) * scale);
+    const nh: usize = @intFromFloat(@as(f32, @floatFromInt(orig_h)) * scale);
+    const pad_x = (model_w - nw) / 2;
+    const pad_y = (model_h - nh) / 2;
+
+    for (0..nh) |iy| {
+        const sy = (iy * orig_h) / nh;
+        const my = pad_y + iy;
+        for (0..nw) |ix| {
+            const sx = (ix * orig_w) / nw;
+            const mx = pad_x + ix;
             const src_idx = (sy * orig_w + sx) * 3;
             const r: f32 = @as(f32, @floatFromInt(image.pixels[src_idx + 0])) / 255.0;
             const g: f32 = @as(f32, @floatFromInt(image.pixels[src_idx + 1])) / 255.0;
@@ -96,109 +103,92 @@ pub fn detectObjects(allocator: std.mem.Allocator, image: Image, min_confidence:
     ) != null) return &.{};
     defer api.*.ReleaseValue.?(input_tensor);
 
-    const input_names = [_][*:0]const u8{"images"};
-    const output_names = [_][*:0]const u8{"output0"};
-    var output_tensor: ?*c.OrtValue = null;
+    var shape_data = [_]f32{ @floatFromInt(orig_h), @floatFromInt(orig_w) };
+    const shape_shape = [_]i64{ 1, 2 };
+    var shape_tensor: ?*c.OrtValue = null;
+    if (api.*.CreateTensorWithDataAsOrtValue.?(
+        mem_info,
+        &shape_data,
+        2 * @sizeOf(f32),
+        &shape_shape,
+        2,
+        c.ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+        &shape_tensor,
+    ) != null) return &.{};
+    defer api.*.ReleaseValue.?(shape_tensor);
+
+    const input_names = [_][*:0]const u8{ "input_1", "image_shape" };
+    const in_tensors = [_]?*const c.OrtValue{ input_tensor, shape_tensor };
+
+    const output_names = [_][*:0]const u8{ "yolonms_layer_1", "yolonms_layer_1:1", "yolonms_layer_1:2" };
+    var out_tensors = [_]?*c.OrtValue{ null, null, null };
 
     if (api.*.Run.?(
         session,
         null,
         &input_names,
-        &input_tensor,
-        1,
+        &in_tensors,
+        2,
         &output_names,
-        1,
-        &output_tensor,
+        3,
+        &out_tensors,
     ) != null) return &.{};
-    defer api.*.ReleaseValue.?(output_tensor);
+    defer for (out_tensors) |ot| api.*.ReleaseValue.?(ot);
 
-    var output_data: [*]f32 = undefined;
-    if (api.*.GetTensorMutableData.?(output_tensor, @ptrCast(&output_data)) != null) return &.{};
+    var boxes_data: [*]f32 = undefined;
+    if (api.*.GetTensorMutableData.?(out_tensors[0], @ptrCast(&boxes_data)) != null) return &.{};
 
-    const num_anchors = 8400;
-    const num_classes = 80;
+    var scores_data: [*]f32 = undefined;
+    if (api.*.GetTensorMutableData.?(out_tensors[1], @ptrCast(&scores_data)) != null) return &.{};
 
+    var indices_data: [*]i32 = undefined;
+    if (api.*.GetTensorMutableData.?(out_tensors[2], @ptrCast(&indices_data)) != null) return &.{};
+
+    var tensor_info: ?*c.OrtTensorTypeAndShapeInfo = null;
+    if (api.*.GetTensorTypeAndShape.?(out_tensors[2], &tensor_info) != null) return &.{};
+    defer api.*.ReleaseTensorTypeAndShapeInfo.?(tensor_info);
+
+    var num_dims: usize = 0;
+    if (api.*.GetDimensionsCount.?(tensor_info, &num_dims) != null) return &.{};
+    var dims: [8]i64 = undefined;
+    if (api.*.GetDimensions.?(tensor_info, &dims, num_dims) != null) return &.{};
+
+    const num_indices: usize = if (num_dims == 3)
+        @intCast(dims[1])
+    else if (num_dims == 2)
+        @intCast(dims[0])
+    else
+        0;
+
+    const num_boxes: usize = 2535;
     var candidates: [64]Detection = undefined;
-    var candidate_count: usize = 0;
-
-    for (0..num_anchors) |i| {
-        var best_score: f32 = 0;
-        var best_class: u32 = 0;
-        for (0..num_classes) |c_idx| {
-            const score = output_data[(4 + c_idx) * num_anchors + i];
-            if (score > best_score) {
-                best_score = score;
-                best_class = @intCast(c_idx);
-            }
-        }
-
-        if (best_score >= min_confidence and candidate_count < candidates.len) {
-            const cx = output_data[0 * num_anchors + i];
-            const cy = output_data[1 * num_anchors + i];
-            const w = output_data[2 * num_anchors + i];
-            const h = output_data[3 * num_anchors + i];
-
-            const norm = (cx <= 1.0 and w <= 1.0 and cy <= 1.0 and h <= 1.0);
-            const scale_x: f32 = if (norm) @as(f32, @floatFromInt(orig_w)) else (@as(f32, @floatFromInt(orig_w)) / 640.0);
-            const scale_y: f32 = if (norm) @as(f32, @floatFromInt(orig_h)) else (@as(f32, @floatFromInt(orig_h)) / 640.0);
-
-            const x1 = std.math.clamp((cx - w / 2.0) * scale_x, 0.0, @as(f32, @floatFromInt(orig_w - 1)));
-            const y1 = std.math.clamp((cy - h / 2.0) * scale_y, 0.0, @as(f32, @floatFromInt(orig_h - 1)));
-            const x2 = std.math.clamp((cx + w / 2.0) * scale_x, 0.0, @as(f32, @floatFromInt(orig_w - 1)));
-            const y2 = std.math.clamp((cy + h / 2.0) * scale_y, 0.0, @as(f32, @floatFromInt(orig_h - 1)));
-
-            candidates[candidate_count] = .{
-                .class_id = best_class,
-                .confidence = best_score,
-                .x1 = x1,
-                .y1 = y1,
-                .x2 = x2,
-                .y2 = y2,
-            };
-            candidate_count += 1;
-        }
-    }
-
-    // Sort candidates descending by confidence
-    std.mem.sort(Detection, candidates[0..candidate_count], {}, struct {
-        fn desc(_: void, a: Detection, b: Detection) bool {
-            return a.confidence > b.confidence;
-        }
-    }.desc);
-
-    // Non-maximum suppression (NMS) with IoU threshold 0.45
     var count: usize = 0;
-    for (candidates[0..candidate_count]) |cand| {
-        if (count >= 16) break;
-        var keep = true;
-        for (candidates[0..count]) |sel| {
-            if (sel.class_id == cand.class_id and iou(sel, cand) > 0.45) {
-                keep = false;
-                break;
-            }
-        }
-        if (keep) {
-            candidates[count] = cand;
-            count += 1;
-        }
+
+    for (0..num_indices) |i| {
+        if (count >= candidates.len) break;
+        const class_idx: usize = @intCast(indices_data[i * 3 + 1]);
+        const box_idx: usize = @intCast(indices_data[i * 3 + 2]);
+
+        const score = scores_data[class_idx * num_boxes + box_idx];
+        if (score < min_confidence) continue;
+
+        const y1 = boxes_data[box_idx * 4 + 0];
+        const x1 = boxes_data[box_idx * 4 + 1];
+        const y2 = boxes_data[box_idx * 4 + 2];
+        const x2 = boxes_data[box_idx * 4 + 3];
+
+        candidates[count] = .{
+            .class_id = @intCast(class_idx),
+            .confidence = score,
+            .x1 = std.math.clamp(x1, 0.0, @as(f32, @floatFromInt(orig_w - 1))),
+            .y1 = std.math.clamp(y1, 0.0, @as(f32, @floatFromInt(orig_h - 1))),
+            .x2 = std.math.clamp(x2, 0.0, @as(f32, @floatFromInt(orig_w - 1))),
+            .y2 = std.math.clamp(y2, 0.0, @as(f32, @floatFromInt(orig_h - 1))),
+        };
+        count += 1;
     }
 
     return allocator.dupe(Detection, candidates[0..count]) catch &.{};
-}
-
-fn iou(a: Detection, b: Detection) f32 {
-    const x1 = @max(a.x1, b.x1);
-    const y1 = @max(a.y1, b.y1);
-    const x2 = @min(a.x2, b.x2);
-    const y2 = @min(a.y2, b.y2);
-
-    const intersection = @max(0.0, x2 - x1) * @max(0.0, y2 - y1);
-    const area_a = (a.x2 - a.x1) * (a.y2 - a.y1);
-    const area_b = (b.x2 - b.x1) * (b.y2 - b.y1);
-    const union_area = area_a + area_b - intersection;
-
-    if (union_area <= 0) return 0;
-    return intersection / union_area;
 }
 
 fn loadJpeg(allocator: std.mem.Allocator, bytes: []const u8) !Image {
@@ -244,7 +234,7 @@ fn saveAnnotatedJpeg(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         else
             .{ .r = 0, .g = 180, .b = 255 }; // cyan for others
 
-        drawBoxRgb24(rgb_slice, image.width, image.height, @intFromFloat(d.x1), @intFromFloat(d.y1), @intFromFloat(d.x2), @intFromFloat(d.y2), color, 4);
+        drawBoxRgb24(rgb_slice, image.width, image.height, @intFromFloat(d.x1), @intFromFloat(d.y1), @intFromFloat(d.x2), @intFromFloat(d.y2), color, 8);
     }
 
     var out_img: zigimg.Image = .{
@@ -253,7 +243,7 @@ fn saveAnnotatedJpeg(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         .pixels = .{ .rgb24 = rgb_slice },
     };
 
-    const write_buf = try allocator.alloc(u8, 4 * 1024 * 1024);
+    const write_buf = try allocator.alloc(u8, 32 * 1024 * 1024);
     defer allocator.free(write_buf);
 
     try out_img.writeToFilePath(allocator, io, path, write_buf, .{ .jpeg = .{ .quality = 85 } });
@@ -286,34 +276,40 @@ fn drawBoxRgb24(pixels: []zigimg.color.Rgb24, width: u32, height: u32, x1_in: i3
     }
 }
 
+fn loadJpegFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Image {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+    return loadJpeg(allocator, bytes);
+}
+
 pub fn main(init: std.process.Init) !void {
     try zimo.open(init.gpa, init.io, ".zimo");
     defer zimo.close();
 
     std.debug.print("identity: detectObjects={s}\n\n", .{here.id(.detectObjects)[0..16]});
 
-    const bus_image = try loadJpeg(init.gpa, bus_jpg);
-    defer init.gpa.free(bus_image.pixels);
+    const street_image = try loadJpegFile(init.gpa, init.io, "zig-out/images/street.jpg");
+    defer init.gpa.free(street_image.pixels);
 
-    std.debug.print("Loaded inputs/bus.jpg ({d}x{d}, {d} bytes)\n\n", .{ bus_image.width, bus_image.height, bus_image.pixels.len });
+    std.debug.print("Loaded zig-out/images/street.jpg ({d}x{d}, {d} bytes)\n\n", .{ street_image.width, street_image.height, street_image.pixels.len });
 
     var t = Trace.start(init.io);
-    const bus_res = here.call(.detectObjects, .{ init.gpa, bus_image, 0.40 });
-    defer init.gpa.free(bus_res);
-    t.report("detectObjects(bus, 0.40)", bus_res);
+    const res1 = here.call(.detectObjects, .{ init.gpa, street_image, 0.40 });
+    defer init.gpa.free(res1);
+    t.report("detectObjects(street, 0.40)", res1);
 
-    const res2 = here.call(.detectObjects, .{ init.gpa, bus_image, 0.40 });
+    const res2 = here.call(.detectObjects, .{ init.gpa, street_image, 0.40 });
     defer init.gpa.free(res2);
-    t.report("detectObjects(bus, 0.40)", res2);
+    t.report("detectObjects(street, 0.40)", res2);
 
-    const res3 = here.call(.detectObjects, .{ init.gpa, bus_image, 0.60 });
+    const res3 = here.call(.detectObjects, .{ init.gpa, street_image, 0.60 });
     defer init.gpa.free(res3);
-    t.report("detectObjects(bus, 0.60)", res3);
+    t.report("detectObjects(street, 0.60)", res3);
 
-    try saveAnnotatedJpeg(init.gpa, init.io, "inputs/bus_annotated.jpg", bus_image, bus_res);
+    try saveAnnotatedJpeg(init.gpa, init.io, "zig-out/images/street_annotated.jpg", street_image, res1);
 
     std.debug.print("\nhits={d} misses={d}\n", .{ zimo.stats.hits, zimo.stats.misses });
-    std.debug.print("Saved annotated image to inputs/bus_annotated.jpg\n", .{});
+    std.debug.print("Saved annotated image to zig-out/images/street_annotated.jpg\n", .{});
 }
 
 fn formatDuration(buf: []u8, us: u64) []const u8 {

@@ -7,6 +7,3 @@ zig-pkg/
 .zigcache/
 .zimo/
 
-# generated outputs
-inputs/*_annotated.jpg
-

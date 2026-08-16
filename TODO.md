@@ -1,3 +1,7 @@
  - [ ] examples with ML
  - [ ] GC
+ - [ ] checksum of all of code, not just first function
+ - [ ] faster cache validation
+ - [ ] option for fast stale builds
  - [ ] build progress for long duration
+ - [ ] keep building out the demo app
