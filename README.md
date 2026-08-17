@@ -13,6 +13,8 @@ zig build test                       # runtime tests
 zig build run                        # object detection demo; run twice to see cache hit
 ```
 
+The demo needs nothing installed. ONNX Runtime comes from the [onnxruntime](https://github.com/kirillrdy/onnxruntime) package, which builds it and its dependencies from source with the Zig build system; the model and test image are fetched by the build too. The C++ runtime comes from Zig's own libc++, so the demo links against no system library beyond libc. The first build compiles a few thousand C++ files and takes a while; later ones are cached.
+
 ## The key
 
 ```
