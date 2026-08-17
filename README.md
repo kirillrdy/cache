@@ -175,16 +175,3 @@ produced different keys. The NaN test caught that.
   the compiler, with `@setEvalBranchQuota(2_000_000)`. Fine for a file this
   size; a large file with many cached functions would want measuring.
 - **No eviction, no size bound, no TTL** on the disk store.
-
-## History
-
-This started as a Go prototype (`purecache`) built to compare the two
-languages, on the theory that `go/ast` + `go/types` would make the analyser
-easier. That was wrong: `std.zig.Ast` is a complete parser with a canonical
-printer and typed accessors, and the port came out at 358 lines against Go's
-685 — with a canonicalisation that cannot silently include comments, where the
-Go version needed comment fields cleared on six node types and got it wrong on
-the first attempt.
-
-The Go prototype was removed once the comparison was settled. It is still in
-the history at commit `05813da`.
