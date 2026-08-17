@@ -1,17 +1,16 @@
 # zimo
 
-Function-call caching keyed on a checksum of the function's source and its
-arguments.
+Function-call caching keyed on a checksum of the function's source and its arguments.
 
 ```
 zimo.zig       library: memo wrappers, comptime argument hashing, disk store
 identity.zig   library: transitive source checksum, computed at comptime
-demo.zig       example: pure functions, cached wrappers, and a main
+demo.zig       example: ONNX YOLOv3 inference with cached execution
 ```
 
 ```sh
 zig build test                       # runtime tests
-zig build run                        # the caching demo; run it twice
+zig build run                        # object detection demo; run twice to see cache hit
 ```
 
 ## The key
@@ -20,16 +19,11 @@ zig build run                        # the caching demo; run it twice
 key = sha256( function identity || canonical encoding of the arguments )
 ```
 
-**Function identity** is not the checksum of one function body. A cache keyed
-on that goes stale the moment a callee changes. It is a checksum over the
-target function **and every top-level declaration it transitively references**:
-callees, consts, and type declarations.
+**Function identity** is not just the checksum of a single function body. A cache keyed on that would go stale the moment a helper function, constant, or type definition changes. Instead, it is a checksum computed over the target function **and every top-level declaration it transitively references**: callees, constants, and type declarations.
 
-**Canonical** means two things hash alike exactly when a pure function cannot
-tell them apart. For source, that is the token stream — `//` comments are not
-tokens in Zig, so reformatting and rewording cannot invalidate a cache entry.
-For arguments, pointers are followed, all NaNs collapse to one value, `-0.0`
-meets `+0.0`, and the type name is part of the encoding so `u32(1)` ≠ `u64(1)`.
+**Canonical** means two things hash alike exactly when a pure function cannot tell them apart:
+- **Source**: Token stream hashing. In Zig, `//` comments and whitespace are not tokens, so reformatting or rewriting comments will not invalidate a cache entry.
+- **Arguments**: Pointers and slices are followed to hash their contents, all NaNs collapse to a single canonical value, `-0.0` equals `+0.0`, and the type name is part of the encoding (e.g. `u32(1)` ≠ `u64(1)`).
 
 ## Using it
 
@@ -37,141 +31,60 @@ meets `+0.0`, and the type name is part of the encoding so `u32(1)` ≠ `u64(1)`
 const std = @import("std");
 const zimo = @import("zimo");
 
-const here = zimo.bind(@This(), @embedFile("demo.zig"));
+const here = zimo.bind(@This(), @embedFile("my_module.zig"));
 
 pub fn score(xs: []const f64, w: Weights) f64 { ... }
 
-here.call(.score, .{ xs, w });
+// Initialize disk cache store (optional, enables cross-process persistence)
+try zimo.open(allocator, io, ".zimo");
+defer zimo.close();
+
+// Call memoised function
+const result = here.call(.score, .{ xs, w });
 ```
 
-That is the whole setup. One binding for the file, one line per cached
-function. No generated file to import, no build step to wire up, and no way for
-the checksum to be stale with respect to the source — the compiler derives it
-from the same bytes it is compiling.
+That is the entire setup. One binding per file, one line per cached call. No code generation step, no build artifacts to wire up, and no risk of the checksum going out of sync with the source — the compiler derives the identity directly from the file bytes at compile time.
 
-## The checksum is computed at comptime
+## How it works at comptime
 
-`std.zig.Tokenizer` does not allocate, which means **it runs at compile time**,
-and so does `std.crypto.hash.sha2.Sha256`. So `identity.zig` tokenizes
-`@embedFile`'d source inside the compiler, finds container-level declarations
-by tracking brace depth, walks the transitive closure of the names each one
-mentions, and hashes the lot — all before the program exists.
+Zig's `std.zig.Tokenizer` and `std.crypto.hash.sha2.Sha256` do not allocate, meaning **they run entirely at compile time**.
 
-That removes the parts a normal codegen approach needs: no `cache_ids.zig`, no
-`addRunArtifact`/`addOutputFileArg` plumbing, no import of a generated module,
-and no separate tool that has to be kept in sync with the runtime.
+`identity.zig` tokenizes the `@embedFile`'d source during compilation, identifies container-level declarations by tracking brace depth, builds the transitive closure of referenced symbols, and computes the SHA-256 hash — all before runtime execution begins.
 
-Only a tokenizer is available — `std.zig.Ast` allocates — so declaration
-boundaries come from brace depth rather than a parse. That is enough for
-container-level declarations, which is all a cache identity needs.
+Because `std.zig.Ast` allocates while `std.zig.Tokenizer` does not, declaration boundaries are resolved via brace depth. This provides container-level granularity without requiring memory allocation at comptime.
 
-## It works
+## Invalidation semantics
 
-Cold, then warm in a second process:
+Invalidations track transitive dependencies with declaration-level precision:
 
-```
-slowFib(34)        MISS    36589us -> 5702887  |  slowFib(34)     HIT  127us
-slowFib(34)        HIT        73us -> 5702887  |  slowFib(34)     HIT   22us
-score              MISS       42us -> 2.53     |  score           HIT   33us
-score              HIT        26us -> 2.53     |  score           HIT   27us
-score (copy)       HIT        24us -> 2.53     |  score (copy)    HIT   27us
-score (changed)    MISS       33us -> 2.532    |  score (changed) HIT   27us
-hits=3 misses=3                                |  hits=6 misses=0
-```
-
-`score (copy)` passes a different backing array with the same contents and
-hits, because the key is the contents.
-
-Editing `const scale` — which only `score` reaches, two calls down through
-`normalise` — invalidates exactly the right entries, with nobody having to
-remember to:
-
-```
-slowFib(34)        HIT       114us -> 5702887     <- identity unchanged
-score              MISS       75us -> 2.8         <- recomputed, new value (was 2.53)
-score              HIT        26us -> 2.8
-```
-
-Verified invalidation semantics:
-
-| change to `demo.zig` | `score` | `slowFib` |
+| Change to source | Target function identity | Unrelated function identity |
 |---|---|---|
-| baseline | `bb35898d` | `ec859488` |
-| edited `main`, unrelated to either | `bb35898d` | `ec859488` |
-| rewrote a doc comment, added `//` comment and blank lines | `bb35898d` | `ec859488` |
-| renamed a local in callee `sum` | `3bf28b3e` | `ec859488` |
-| `const scale` 1000 → 100, read via `normalise` | `f346a75b` | `ec859488` |
-| added a field to `Weights` | `797753f8` | `ec859488` |
+| Edit unrelated function (`main`) | **Unchanged** | **Unchanged** |
+| Rewrite doc comments, add `//` comments, reformat | **Unchanged** | **Unchanged** |
+| Rename a local variable in a referenced callee | **Changed** | **Unchanged** |
+| Modify a referenced `const` value | **Changed** | **Unchanged** |
+| Add or change a field in a referenced `struct` | **Changed** | **Unchanged** |
 
-The second row matters most: the embedded source is the *whole file*, including
-`main` and the wrappers, yet an edit to `main` moves nothing. Granularity comes
-from the transitive closure, not from what was embedded.
+Granularity comes from the transitive dependency graph rather than file-level checksums, ensuring unrelated edits do not cause false cache invalidations.
 
 ## Purity and correctness
 
-The library requires no annotations or source directives. There is no allowlist
-of blessed namespaces or builtins either. Deciding whether `std.foo.bar` is pure
-is not something a syntactic pass can do, and guessing is worse than not guessing:
-a false positive blocks correct code, and a false negative reads as a guarantee
-that was never checked.
+The library requires no manual annotations or compiler directives. Deciding whether arbitrary code is semantically pure cannot be solved syntactically, so `Memo` verifies structural guarantees at compile time via `@typeInfo`:
 
-Nothing verifies semantic purity at compile time: `Memo` will happily cache an
-impure function if you pass it one. What *is* verified at compile time via
-`@typeInfo` are structural guarantees:
-- arguments must be hashable by content (e.g. no `anytype`, no function pointers)
-- results must be self-contained (no pointers that would dangle across processes)
+- **Arguments** must have hashable content (e.g. no `anytype`, no function pointers).
+- **Pointers and slices** in arguments are hashed by value/contents, not memory addresses.
+- **Results** must be storable (value types or slices). Single unmanaged pointers (`*T`) are rejected because their pointee lifetime cannot be safely restored across processes.
+- **Allocators** (`std.mem.Allocator`) passed as arguments are recognized and used to allocate returned slices on cache hits.
 
-In Zig, reaching the outside world mostly means taking an `Io` or an allocator,
-which naturally surfaces in the function signature. A function taking neither is
-already close to pure by construction.
+## Supported types
 
-## Arguments
-
-There is deliberately no per-parameter configuration for pointers and slices.
-
-- **value types** (numbers, bools, enums, arrays, structs of those) — hashed
-  as-is
-- **pointers and slices** — hashed by content, following the pointer. That is
-  the only sound choice: a pure function cannot observe an address, so hashing
-  identity would be wrong in every case. And that caller code does not mutate
-  the referent behind the cache's back is part of what memoisation assumes.
-- **`anytype`, function parameters** — rejected at compile time (no hashable
-  content).
-
-## The runtime is all comptime
-
-`@typeInfo` resolves the whole argument encoding and result layout at compile
-time. There is no runtime reflection and no encoder, and a type that cannot be
-cached is a compile error at the `Memo` call site:
-
-```
-error: zimo: result type []const u8 contains a pointer; a cached result must be self-contained
-error: zimo: cannot hash *const fn (u32) u32; a function has no content a pure function could depend on
-```
-
-One wrinkle worth recording: structs are hashed *structurally* — field count,
-names, types — rather than by `@typeName`. For an anonymous tuple holding
-comptime-known values, `@typeName` embeds the values themselves, so two
-argument tuples a pure function could not tell apart would otherwise have
-produced different keys. The NaN test caught that.
+- **Value types** (integers, floats, bools, enums, arrays, structs) — hashed and stored by value.
+- **Slices** (`[]T`, `[]const u8`, etc.) — arguments hashed by element contents; slice return types are stored to disk and re-allocated via the caller's allocator on cache hits.
+- **Pointers** (`*const T`) — argument referents are dereferenced and hashed by content. Single pointer return types are rejected at compile time.
+- **Structs** — hashed structurally (field names, types, and values) rather than by `@typeName`, ensuring anonymous tuples with comptime values hash predictably.
 
 ## Known limits
 
-- **Single file.** The checksum covers one file's top-level declarations.
-  Anything imported is invisible to it, which is the largest correctness gap:
-  a pure function calling into another module of your own project will not
-  invalidate when that module changes.
-- **Results must be self-contained.** `assertStorable` rejects any result
-  containing a pointer, so returning a `[]const u8` from a cached function is a
-  compile error rather than a supported case. Lifting it means writing a
-  serialiser and deciding who owns the memory a decoded value lands in.
-- **Dependency extraction matches identifiers by name**, so a local shadowing a
-  top-level name creates a false dependency. Over-approximating is the safe
-  direction — a spurious miss, never a stale hit — but the fix needs real scope
-  resolution, and `std.zig.Ast` is purely syntactic. `AstGen`/`Zir` is the
-  compiler's own lowering rather than a name-resolution API you would want to
-  drive from outside.
-- **Comptime cost.** Deriving identities runs a tokenizer and SHA-256 inside
-  the compiler, with `@setEvalBranchQuota(2_000_000)`. Fine for a file this
-  size; a large file with many cached functions would want measuring.
-- **No eviction, no size bound, no TTL** on the disk store.
+- **Single file scope**: Transitive dependency hashing currently inspects declarations within the embedded file. External `@import` modules are not yet transitively walked.
+- **Lexical dependency extraction**: Identifier references are matched by symbol name. A local variable that shadows a top-level declaration will over-approximate dependencies (causing a safe miss, never a stale hit).
+- **Disk store**: The default store does not implement eviction policies, size quotas, or TTL.

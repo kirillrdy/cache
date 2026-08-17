@@ -1,7 +1,6 @@
 const std = @import("std");
 const zimo = @import("zimo");
 const zigimg = @import("zigimg");
-
 const c = @cImport({
     @cInclude("onnxruntime_c_api.h");
 });
@@ -12,11 +11,8 @@ const model_path = "zig-out/models/tiny-yolov3-11.onnx";
 const image_path = "zig-out/images/street.jpg";
 const annotated_path = "zig-out/images/street_annotated.jpg";
 
-/// Tiny YOLOv3 takes a 416x416 letterboxed image and emits boxes in the
-/// coordinates of the original image.
 const model_size = 416;
 const input_len = 3 * model_size * model_size;
-const max_detections = 64;
 
 pub const CLASS_NAMES = [_][]const u8{
     "person",       "bicycle",   "car",           "motorcycle", "airplane",     "bus",            "train",      "truck",      "boat",          "traffic light",
@@ -29,7 +25,6 @@ pub const CLASS_NAMES = [_][]const u8{
     "toaster",      "sink",      "refrigerator",  "book",       "clock",        "vase",           "scissors",   "teddy bear", "hair drier",    "toothbrush",
 };
 
-/// Packed RGB, three bytes per pixel.
 pub const Image = struct {
     width: u32,
     height: u32,
@@ -45,79 +40,74 @@ pub const Detection = struct {
     y2: f32,
 };
 
-/// The memoised entry point: everything below is pure, so a cache hit and a
-/// real inference run are indistinguishable to the caller.
+/// Pure memoised entry point: image + threshold -> detections.
 pub fn detectObjects(allocator: std.mem.Allocator, image: Image, min_confidence: f32) []Detection {
     return runModel(allocator, image, min_confidence) catch &.{};
 }
 
 fn runModel(allocator: std.mem.Allocator, image: Image, min_confidence: f32) ![]Detection {
-    const api_base = c.OrtGetApiBase();
-    if (api_base == null) return error.OnnxRuntime;
+    const api_base = c.OrtGetApiBase() orelse return error.OnnxRuntime;
     const api: *const c.OrtApi = api_base.*.GetApi.?(c.ORT_API_VERSION) orelse return error.OnnxRuntime;
 
     var env: ?*c.OrtEnv = null;
     try check(api.CreateEnv.?(c.ORT_LOGGING_LEVEL_WARNING, "yolo_env", &env));
     defer api.ReleaseEnv.?(env);
 
-    var session_options: ?*c.OrtSessionOptions = null;
-    try check(api.CreateSessionOptions.?(&session_options));
-    defer api.ReleaseSessionOptions.?(session_options);
+    var opts: ?*c.OrtSessionOptions = null;
+    try check(api.CreateSessionOptions.?(&opts));
+    defer api.ReleaseSessionOptions.?(opts);
 
     var session: ?*c.OrtSession = null;
-    try check(api.CreateSession.?(env, model_path, session_options, &session));
+    try check(api.CreateSession.?(env, model_path, opts, &session));
     defer api.ReleaseSession.?(session);
 
-    var mem_info: ?*c.OrtMemoryInfo = null;
-    try check(api.CreateCpuMemoryInfo.?(c.OrtArenaAllocator, c.OrtMemTypeDefault, &mem_info));
-    defer api.ReleaseMemoryInfo.?(mem_info);
+    var mem: ?*c.OrtMemoryInfo = null;
+    try check(api.CreateCpuMemoryInfo.?(c.OrtArenaAllocator, c.OrtMemTypeDefault, &mem));
+    defer api.ReleaseMemoryInfo.?(mem);
 
     var input: [input_len]f32 = undefined;
     letterbox(image, &input);
-    var original_size = [_]f32{ @floatFromInt(image.height), @floatFromInt(image.width) };
+    var shape_data = [_]f32{ @floatFromInt(image.height), @floatFromInt(image.width) };
 
-    const input_tensor = try floatTensor(api, mem_info, &input, &.{ 1, 3, model_size, model_size });
+    const input_tensor = try createTensor(api, mem, &input, &.{ 1, 3, model_size, model_size });
     defer api.ReleaseValue.?(input_tensor);
 
-    const size_tensor = try floatTensor(api, mem_info, &original_size, &.{ 1, 2 });
-    defer api.ReleaseValue.?(size_tensor);
+    const shape_tensor = try createTensor(api, mem, &shape_data, &.{ 1, 2 });
+    defer api.ReleaseValue.?(shape_tensor);
 
-    const input_names = [_][*:0]const u8{ "input_1", "image_shape" };
-    const inputs = [_]?*const c.OrtValue{ input_tensor, size_tensor };
-    const output_names = [_][*:0]const u8{ "yolonms_layer_1", "yolonms_layer_1:1", "yolonms_layer_1:2" };
-    var outputs = [_]?*c.OrtValue{ null, null, null };
+    const in_names = [_][*:0]const u8{ "input_1", "image_shape" };
+    const in_values = [_]?*const c.OrtValue{ input_tensor, shape_tensor };
+    const out_names = [_][*:0]const u8{ "yolonms_layer_1", "yolonms_layer_1:1", "yolonms_layer_1:2" };
+    var out_values = [_]?*c.OrtValue{ null, null, null };
 
-    try check(api.Run.?(session, null, &input_names, &inputs, inputs.len, &output_names, outputs.len, &outputs));
-    defer for (outputs) |o| api.ReleaseValue.?(o);
+    try check(api.Run.?(session, null, &in_names, &in_values, 2, &out_names, 3, &out_values));
+    defer for (out_values) |o| api.ReleaseValue.?(o);
 
-    const boxes = try tensorData(api, f32, outputs[0]);
-    const scores = try tensorData(api, f32, outputs[1]);
-    const indices = try tensorData(api, i32, outputs[2]);
+    const boxes = try tensorData(api, f32, out_values[0]);
+    const scores = try tensorData(api, f32, out_values[1]);
+    const indices = try tensorData(api, i32, out_values[2]);
 
-    // scores are [1, classes, boxes]; selected indices are [1, n, 3] (or [n, 3]).
-    const num_boxes: usize = @intCast(try dimFromEnd(api, outputs[1], 0));
-    const num_indices: usize = @intCast(try dimFromEnd(api, outputs[2], 1));
+    const num_boxes: usize = @intCast(try tensorDim(api, out_values[1], 2)); // [1, classes, boxes]
+    const num_indices: usize = @intCast(try tensorDim(api, out_values[2], 1)); // [1, indices, 3]
 
-    var found: [max_detections]Detection = undefined;
+    var found: [64]Detection = undefined;
     var count: usize = 0;
 
     for (0..num_indices) |i| {
-        if (count == found.len) break;
+        if (count >= found.len) break;
         const class_id: usize = @intCast(indices[i * 3 + 1]);
         const box_id: usize = @intCast(indices[i * 3 + 2]);
-
         const confidence = scores[class_id * num_boxes + box_id];
         if (confidence < min_confidence) continue;
 
-        // A box arrives as (y1, x1, y2, x2).
-        const box = boxes[box_id * 4 ..][0..4];
+        const b = boxes[box_id * 4 ..][0..4];
         found[count] = .{
             .class_id = @intCast(class_id),
             .confidence = confidence,
-            .x1 = clampToExtent(box[1], image.width),
-            .y1 = clampToExtent(box[0], image.height),
-            .x2 = clampToExtent(box[3], image.width),
-            .y2 = clampToExtent(box[2], image.height),
+            .x1 = clamp(b[1], image.width),
+            .y1 = clamp(b[0], image.height),
+            .x2 = clamp(b[3], image.width),
+            .y2 = clamp(b[2], image.height),
         };
         count += 1;
     }
@@ -125,49 +115,43 @@ fn runModel(allocator: std.mem.Allocator, image: Image, min_confidence: f32) ![]
     return allocator.dupe(Detection, found[0..count]);
 }
 
-/// Scale the image to fit inside model_size x model_size, centred on a grey
-/// background, as planar RGB in [0, 1].
 fn letterbox(image: Image, out: *[input_len]f32) void {
     @memset(out, 128.0 / 255.0);
 
-    const src_w: usize = image.width;
-    const src_h: usize = image.height;
-    const scale = @min(
-        model_size / @as(f32, @floatFromInt(src_w)),
-        model_size / @as(f32, @floatFromInt(src_h)),
-    );
-    const dst_w: usize = @intFromFloat(@as(f32, @floatFromInt(src_w)) * scale);
-    const dst_h: usize = @intFromFloat(@as(f32, @floatFromInt(src_h)) * scale);
+    const src_w: f32 = @floatFromInt(image.width);
+    const src_h: f32 = @floatFromInt(image.height);
+    const scale = @min(model_size / src_w, model_size / src_h);
+    const dst_w: usize = @intFromFloat(src_w * scale);
+    const dst_h: usize = @intFromFloat(src_h * scale);
     const pad_x = (model_size - dst_w) / 2;
     const pad_y = (model_size - dst_h) / 2;
     const plane = model_size * model_size;
 
     for (0..dst_h) |y| {
-        const src_row = ((y * src_h) / dst_h) * src_w;
+        const src_y = (y * image.height) / dst_h;
         const dst_row = (pad_y + y) * model_size + pad_x;
         for (0..dst_w) |x| {
-            const src = (src_row + (x * src_w) / dst_w) * 3;
-            for (0..3) |channel| {
-                out[channel * plane + dst_row + x] = @as(f32, @floatFromInt(image.pixels[src + channel])) / 255.0;
+            const src_x = (x * image.width) / dst_w;
+            const src_idx = (src_y * image.width + src_x) * 3;
+            for (0..3) |ch| {
+                out[ch * plane + dst_row + x] = @as(f32, @floatFromInt(image.pixels[src_idx + ch])) / 255.0;
             }
         }
     }
 }
 
-fn clampToExtent(v: f32, extent: usize) f32 {
-    return std.math.clamp(v, 0.0, @as(f32, @floatFromInt(extent - 1)));
+fn clamp(v: f32, max: u32) f32 {
+    return std.math.clamp(v, 0.0, @as(f32, @floatFromInt(max - 1)));
 }
-
-// ---------------------------------------------------------- onnxruntime ---
 
 fn check(status: ?*c.OrtStatus) !void {
     if (status != null) return error.OnnxRuntime;
 }
 
-fn floatTensor(api: *const c.OrtApi, mem_info: ?*c.OrtMemoryInfo, data: []f32, shape: []const i64) !*c.OrtValue {
+fn createTensor(api: *const c.OrtApi, mem: ?*c.OrtMemoryInfo, data: []f32, shape: []const i64) !*c.OrtValue {
     var tensor: ?*c.OrtValue = null;
     try check(api.CreateTensorWithDataAsOrtValue.?(
-        mem_info,
+        mem,
         data.ptr,
         data.len * @sizeOf(f32),
         shape.ptr,
@@ -184,36 +168,31 @@ fn tensorData(api: *const c.OrtApi, comptime T: type, value: ?*c.OrtValue) ![*]T
     return data;
 }
 
-/// A dimension of `value` counted from the end, so that a leading batch
-/// dimension may be present or absent.
-fn dimFromEnd(api: *const c.OrtApi, value: ?*c.OrtValue, from_end: usize) !i64 {
+fn tensorDim(api: *const c.OrtApi, value: ?*c.OrtValue, dim_idx: usize) !i64 {
     var info: ?*c.OrtTensorTypeAndShapeInfo = null;
     try check(api.GetTensorTypeAndShape.?(value, &info));
     defer api.ReleaseTensorTypeAndShapeInfo.?(info);
 
+    var dims: [8]i64 = undefined;
     var rank: usize = 0;
     try check(api.GetDimensionsCount.?(info, &rank));
-
-    var dims: [8]i64 = undefined;
-    if (rank > dims.len or from_end >= rank) return error.OnnxRuntime;
+    if (dim_idx >= rank) return error.OnnxRuntime;
     try check(api.GetDimensions.?(info, &dims, rank));
-    return dims[rank - 1 - from_end];
+    return dims[dim_idx];
 }
-
-// ---------------------------------------------------------------- image ---
 
 fn loadImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Image {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
     defer allocator.free(bytes);
 
-    var decoded = try zigimg.Image.fromMemory(allocator, bytes);
-    defer decoded.deinit(allocator);
-    try decoded.convert(allocator, .rgb24);
+    var img = try zigimg.Image.fromMemory(allocator, bytes);
+    defer img.deinit(allocator);
+    try img.convert(allocator, .rgb24);
 
     return .{
-        .width = @intCast(decoded.width),
-        .height = @intCast(decoded.height),
-        .pixels = try allocator.dupe(u8, decoded.rawBytes()),
+        .width = @intCast(img.width),
+        .height = @intCast(img.height),
+        .pixels = try allocator.dupe(u8, img.rawBytes()),
     };
 }
 
@@ -222,7 +201,23 @@ fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8
     defer allocator.free(pixels);
     const rgb = std.mem.bytesAsSlice(zigimg.color.Rgb24, pixels);
 
-    for (detections) |d| drawBox(rgb, image.width, image.height, d, boxColor(d.class_id));
+    for (detections) |d| {
+        const color = if (d.class_id == 0) zigimg.color.Rgb24{ .r = 0, .g = 255, .b = 0 } else zigimg.color.Rgb24{ .r = 0, .g = 180, .b = 255 };
+        const x1: usize = @intFromFloat(d.x1);
+        const y1: usize = @intFromFloat(d.y1);
+        const x2: usize = @intFromFloat(d.x2);
+        const y2: usize = @intFromFloat(d.y2);
+        const thickness = 8;
+
+        for (y1..@min(y2 + 1, image.height)) |y| {
+            const is_edge_y = y < y1 + thickness or y + thickness > y2;
+            for (x1..@min(x2 + 1, image.width)) |x| {
+                if (is_edge_y or x < x1 + thickness or x + thickness > x2) {
+                    rgb[y * image.width + x] = color;
+                }
+            }
+        }
+    }
 
     const annotated: zigimg.Image = .{
         .width = image.width,
@@ -232,36 +227,8 @@ fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8
 
     const write_buf = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(write_buf);
-
     try annotated.writeToFilePath(allocator, io, path, write_buf, .{ .jpeg = .{ .quality = 85 } });
 }
-
-fn boxColor(class_id: u32) zigimg.color.Rgb24 {
-    return switch (class_id) {
-        0 => .{ .r = 0, .g = 255, .b = 0 }, // person
-        5 => .{ .r = 255, .g = 120, .b = 0 }, // bus
-        else => .{ .r = 0, .g = 180, .b = 255 },
-    };
-}
-
-fn drawBox(pixels: []zigimg.color.Rgb24, width: usize, height: usize, d: Detection, color: zigimg.color.Rgb24) void {
-    const thickness = 8;
-    const x1: usize = @intFromFloat(clampToExtent(@min(d.x1, d.x2), width));
-    const x2: usize = @intFromFloat(clampToExtent(@max(d.x1, d.x2), width));
-    const y1: usize = @intFromFloat(clampToExtent(@min(d.y1, d.y2), height));
-    const y2: usize = @intFromFloat(clampToExtent(@max(d.y1, d.y2), height));
-
-    for (y1..y2 + 1) |y| {
-        const whole_row = y < y1 + thickness or y + thickness > y2;
-        for (x1..x2 + 1) |x| {
-            if (whole_row or x < x1 + thickness or x + thickness > x2) {
-                pixels[y * width + x] = color;
-            }
-        }
-    }
-}
-
-// ----------------------------------------------------------------- demo ---
 
 pub fn main(init: std.process.Init) !void {
     try zimo.open(init.gpa, init.io, ".zimo");
@@ -274,45 +241,24 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Loaded {s} ({d}x{d}, {d} bytes)\n\n", .{ image_path, image.width, image.height, image.pixels.len });
 
-    var trace = Trace.start(init.io);
-    var annotate: []Detection = &.{};
-    defer init.gpa.free(annotate);
+    var first_result: []Detection = &.{};
+    defer init.gpa.free(first_result);
 
-    // The same arguments twice, then a different threshold: only the first of
-    // each pair can miss.
     for ([_]f32{ 0.40, 0.40, 0.60 }, 0..) |min_confidence, run| {
+        const hits_before = zimo.stats.hits;
+        const start = std.Io.Timestamp.now(init.io, .awake);
+
         const detections = here.call(.detectObjects, .{ init.gpa, image, min_confidence });
-        trace.report(min_confidence, detections);
-        if (run == 0) annotate = detections else init.gpa.free(detections);
-    }
+        const elapsed = start.untilNow(init.io, .awake);
+        const status = if (zimo.stats.hits > hits_before) "HIT " else "MISS";
 
-    try saveAnnotatedImage(init.gpa, init.io, annotated_path, image, annotate);
+        std.debug.print("detectObjects(street, {d:.2})    {s}  {f: >9} -> {d} detections\n", .{
+            min_confidence,
+            status,
+            elapsed,
+            detections.len,
+        });
 
-    std.debug.print("\nhits={d} misses={d}\n", .{ zimo.stats.hits, zimo.stats.misses });
-    std.debug.print("Saved annotated image to {s}\n", .{annotated_path});
-}
-
-const Trace = struct {
-    io: std.Io,
-    mark: std.Io.Timestamp,
-    hits: usize,
-
-    fn start(io: std.Io) Trace {
-        return .{
-            .io = io,
-            .mark = .now(io, .awake),
-            .hits = zimo.stats.hits,
-        };
-    }
-
-    fn report(t: *Trace, min_confidence: f32, detections: []const Detection) void {
-        const status = if (zimo.stats.hits > t.hits) "HIT " else "MISS";
-        var label_buf: [64]u8 = undefined;
-        var elapsed_buf: [32]u8 = undefined;
-        const label = std.fmt.bufPrint(&label_buf, "detectObjects(street, {d:.2})", .{min_confidence}) catch unreachable;
-        const elapsed = std.fmt.bufPrint(&elapsed_buf, "{f}", .{t.mark.untilNow(t.io, .awake)}) catch unreachable;
-
-        std.debug.print("{s: <30} {s} {s: >9} -> {d} detections\n", .{ label, status, elapsed, detections.len });
         for (detections, 1..) |d, i| {
             std.debug.print("   [{d}] {s: <12} ({d:.0}%) box=[{d:.0}, {d:.0}, {d:.0}, {d:.0}]\n", .{
                 i,
@@ -325,7 +271,9 @@ const Trace = struct {
             });
         }
 
-        t.hits = zimo.stats.hits;
-        t.mark = .now(t.io, .awake);
+        if (run == 0) first_result = detections else init.gpa.free(detections);
     }
-};
+
+    try saveAnnotatedImage(init.gpa, init.io, annotated_path, image, first_result);
+    std.debug.print("\nhits={d} misses={d}\nSaved annotated image to {s}\n", .{ zimo.stats.hits, zimo.stats.misses, annotated_path });
+}
