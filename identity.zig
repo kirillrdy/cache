@@ -22,9 +22,9 @@ const Tok = struct {
 
 const Decl = struct {
     name: []const u8,
-    /// Canonical text: one `tag:slice` line per token, doc comments skipped.
-    /// Regular comments and whitespace are absent because the tokenizer never
-    /// produces them, so reformatting cannot change this.
+    /// Canonical text: one token per line, doc comments skipped. Regular
+    /// comments and whitespace are absent because the tokenizer never produces
+    /// them, so reformatting cannot change this.
     canonical: []const u8,
     /// Container-level names mentioned anywhere inside the declaration.
     refs: []const []const u8,
@@ -182,12 +182,16 @@ fn declEnd(comptime toks: []const Tok, comptime kw: usize) usize {
     }
 }
 
+/// The token text alone, one per line. The tag is left out: it is a function
+/// of the text for every token the tokenizer can produce, and its name is
+/// longer than the token it labels, which at compile time costs more in string
+/// building and hashing than the whole rest of the walk.
 fn canonical(comptime toks: []const Tok) []const u8 {
     comptime {
         var out: []const u8 = "";
         for (toks) |t| {
             if (t.tag == .doc_comment) continue;
-            out = out ++ @tagName(t.tag) ++ ":" ++ t.text ++ "\n";
+            out = out ++ t.text ++ "\n";
         }
         return out;
     }
