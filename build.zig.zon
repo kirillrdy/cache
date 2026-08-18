@@ -10,7 +10,8 @@
         // ONNX Runtime, built from source. Published separately because the
         // source lists are large and have nothing to do with caching.
         .onnxruntime = .{
-            .path = "../onnxruntime",
+            .url = "git+https://github.com/kirillrdy/onnxruntime#c07ffb23a60db56d31de369becef93643d742a0b",
+            .hash = "onnxruntime-1.24.4-fNg4hE_0AAB25yOwwAS__6W819R7eTJehE9yGhpXKK4o",
         },
     },
     .fingerprint = 0x6f9e0668843f5ed3,
