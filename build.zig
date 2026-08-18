@@ -23,8 +23,6 @@ pub fn build(b: *std.Build) void {
     demo_mod.addImport("zimo", zimo_mod);
     demo_mod.link_libc = true;
 
-    // Built from source, headers and all, so the demo needs no ONNX Runtime
-    // on the machine and links against nothing but libc.
     const ort = b.dependency("onnxruntime", .{
         .target = target,
         .optimize = optimize,
@@ -34,7 +32,6 @@ pub fn build(b: *std.Build) void {
     const demo = b.addExecutable(.{ .name = "demo", .root_module = demo_mod });
     b.installArtifact(demo);
 
-    // Download Tiny YOLOv3 ONNX model from official ONNX Model Zoo (github.com/onnx/models)
     const download_model = b.addSystemCommand(&.{
         "curl",
         "-sL",
@@ -44,7 +41,6 @@ pub fn build(b: *std.Build) void {
     const install_model = b.addInstallFile(model_onnx, "models/tiny-yolov3-11.onnx");
     b.getInstallStep().dependOn(&install_model.step);
 
-    // Download test image (street.jpg) via build system into zig-out/images/
     const download_img = b.addSystemCommand(&.{
         "curl",
         "-sL",

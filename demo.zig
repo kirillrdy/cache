@@ -40,7 +40,6 @@ pub const Detection = struct {
     y2: f32,
 };
 
-/// Pure memoised entry point: image + threshold -> detections.
 pub fn detectObjects(allocator: std.mem.Allocator, image: Image, min_confidence: f32) []Detection {
     return runModel(allocator, image, min_confidence) catch &.{};
 }
