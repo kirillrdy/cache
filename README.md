@@ -13,7 +13,7 @@ zig build test                       # runtime tests
 zig build run                        # object detection demo; run twice to see cache hit
 ```
 
-The demo needs nothing installed. ONNX Runtime comes from the [onnxruntime](https://github.com/kirillrdy/onnxruntime) package, which builds it and its dependencies from source with the Zig build system; the model and test image are fetched by the build too. The C++ runtime comes from Zig's own libc++, so the demo links against no system library beyond libc. The first build compiles a few thousand C++ files and takes a while; later ones are cached.
+The demo needs nothing installed beyond a GPU driver. Inference runs on the [onnx](https://github.com/kirillrdy/onnx) package, a Zig ONNX runtime with OpenCL, CUDA and Metal backends (OpenCL by default; pass `-Dbackend=cuda` or `-Dbackend=metal`), and the model and test image are fetched by the build.
 
 ## The key
 
@@ -76,7 +76,7 @@ The library requires no manual annotations or compiler directives. Deciding whet
 - **Arguments** must have hashable content (e.g. no `anytype`, no function pointers).
 - **Pointers and slices** in arguments are hashed by value/contents, not memory addresses.
 - **Results** must be storable (value types or slices). Single unmanaged pointers (`*T`) are rejected because their pointee lifetime cannot be safely restored across processes.
-- **Allocators** (`std.mem.Allocator`) passed as arguments are recognized and used to allocate returned slices on cache hits.
+- **Environment arguments** (`std.mem.Allocator`, `std.Io`) are recognized and left out of the key; a slice result is allocated with the allocator given to `zimo.open` on a cache hit.
 
 ## Supported types
 

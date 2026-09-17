@@ -1,9 +1,7 @@
 const std = @import("std");
 const zimo = @import("zimo");
 const zigimg = @import("zigimg");
-const c = @cImport({
-    @cInclude("onnxruntime_c_api.h");
-});
+const onnx = @import("onnx");
 
 const here = zimo.bind(@This(), @embedFile("demo.zig"));
 
@@ -40,54 +38,40 @@ pub const Detection = struct {
     y2: f32,
 };
 
-pub fn detectObjects(allocator: std.mem.Allocator, image: Image, min_confidence: f32) []Detection {
-    return runModel(allocator, image, min_confidence) catch &.{};
+pub fn detectObjects(allocator: std.mem.Allocator, io: std.Io, image: Image, min_confidence: f32) []Detection {
+    return runModel(allocator, io, image, min_confidence) catch |err| {
+        std.debug.print("inference failed: {t}: {s}\n", .{ err, onnx.lastError() });
+        return &.{};
+    };
 }
 
-fn runModel(allocator: std.mem.Allocator, image: Image, min_confidence: f32) ![]Detection {
-    const api_base = c.OrtGetApiBase() orelse return error.OnnxRuntime;
-    const api: *const c.OrtApi = api_base.*.GetApi.?(c.ORT_API_VERSION) orelse return error.OnnxRuntime;
-
-    var env: ?*c.OrtEnv = null;
-    try check(api.CreateEnv.?(c.ORT_LOGGING_LEVEL_WARNING, "yolo_env", &env));
-    defer api.ReleaseEnv.?(env);
-
-    var opts: ?*c.OrtSessionOptions = null;
-    try check(api.CreateSessionOptions.?(&opts));
-    defer api.ReleaseSessionOptions.?(opts);
-
-    var session: ?*c.OrtSession = null;
-    try check(api.CreateSession.?(env, model_path, opts, &session));
-    defer api.ReleaseSession.?(session);
-
-    var mem: ?*c.OrtMemoryInfo = null;
-    try check(api.CreateCpuMemoryInfo.?(c.OrtArenaAllocator, c.OrtMemTypeDefault, &mem));
-    defer api.ReleaseMemoryInfo.?(mem);
+fn runModel(allocator: std.mem.Allocator, io: std.Io, image: Image, min_confidence: f32) ![]Detection {
+    const env = try onnx.Env.init(allocator, io);
+    defer env.deinit();
+    const session = try onnx.Session.open(env, model_path);
+    defer session.deinit();
 
     var input: [input_len]f32 = undefined;
     letterbox(image, &input);
-    var shape_data = [_]f32{ @floatFromInt(image.height), @floatFromInt(image.width) };
-
-    const input_tensor = try createTensor(api, mem, &input, &.{ 1, 3, model_size, model_size });
-    defer api.ReleaseValue.?(input_tensor);
-
-    const shape_tensor = try createTensor(api, mem, &shape_data, &.{ 1, 2 });
-    defer api.ReleaseValue.?(shape_tensor);
+    const shape_data = [_]f32{ @floatFromInt(image.height), @floatFromInt(image.width) };
 
     const in_names = [_][*:0]const u8{ "input_1", "image_shape" };
-    const in_values = [_]?*const c.OrtValue{ input_tensor, shape_tensor };
+    const in_values = [_]onnx.Value{
+        try onnx.Value.borrowF32(&input, &.{ 1, 3, model_size, model_size }),
+        try onnx.Value.borrowF32(&shape_data, &.{ 1, 2 }),
+    };
     const out_names = [_][*:0]const u8{ "yolonms_layer_1", "yolonms_layer_1:1", "yolonms_layer_1:2" };
-    var out_values = [_]?*c.OrtValue{ null, null, null };
+    var out_values: [3]onnx.Value = undefined;
 
-    try check(api.Run.?(session, null, &in_names, &in_values, 2, &out_names, 3, &out_values));
-    defer for (out_values) |o| api.ReleaseValue.?(o);
+    try session.run(&in_names, &in_values, &out_names, &out_values);
+    defer for (out_values) |o| o.deinit();
 
-    const boxes = try tensorData(api, f32, out_values[0]);
-    const scores = try tensorData(api, f32, out_values[1]);
-    const indices = try tensorData(api, i32, out_values[2]);
+    const boxes = try out_values[0].dataF32();
+    const scores = try out_values[1].dataF32();
+    const indices: []const i32 = @alignCast(std.mem.bytesAsSlice(i32, out_values[2].bytes));
 
-    const num_boxes: usize = @intCast(try tensorDim(api, out_values[1], 2)); // [1, classes, boxes]
-    const num_indices: usize = @intCast(try tensorDim(api, out_values[2], 1)); // [1, indices, 3]
+    const num_boxes: usize = @intCast(out_values[1].dims[2]); // [1, classes, boxes]
+    const num_indices: usize = @intCast(out_values[2].dims[1]); // [1, indices, 3]
 
     var found: [64]Detection = undefined;
     var count: usize = 0;
@@ -141,43 +125,6 @@ fn letterbox(image: Image, out: *[input_len]f32) void {
 
 fn clamp(v: f32, max: u32) f32 {
     return std.math.clamp(v, 0.0, @as(f32, @floatFromInt(max - 1)));
-}
-
-fn check(status: ?*c.OrtStatus) !void {
-    if (status != null) return error.OnnxRuntime;
-}
-
-fn createTensor(api: *const c.OrtApi, mem: ?*c.OrtMemoryInfo, data: []f32, shape: []const i64) !*c.OrtValue {
-    var tensor: ?*c.OrtValue = null;
-    try check(api.CreateTensorWithDataAsOrtValue.?(
-        mem,
-        data.ptr,
-        data.len * @sizeOf(f32),
-        shape.ptr,
-        shape.len,
-        c.ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-        &tensor,
-    ));
-    return tensor.?;
-}
-
-fn tensorData(api: *const c.OrtApi, comptime T: type, value: ?*c.OrtValue) ![*]T {
-    var data: [*]T = undefined;
-    try check(api.GetTensorMutableData.?(value, @ptrCast(&data)));
-    return data;
-}
-
-fn tensorDim(api: *const c.OrtApi, value: ?*c.OrtValue, dim_idx: usize) !i64 {
-    var info: ?*c.OrtTensorTypeAndShapeInfo = null;
-    try check(api.GetTensorTypeAndShape.?(value, &info));
-    defer api.ReleaseTensorTypeAndShapeInfo.?(info);
-
-    var dims: [8]i64 = undefined;
-    var rank: usize = 0;
-    try check(api.GetDimensionsCount.?(info, &rank));
-    if (dim_idx >= rank) return error.OnnxRuntime;
-    try check(api.GetDimensions.?(info, &dims, rank));
-    return dims[dim_idx];
 }
 
 fn loadImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Image {
@@ -247,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
         const hits_before = zimo.stats.hits;
         const start = std.Io.Timestamp.now(init.io, .awake);
 
-        const detections = here.call(.detectObjects, .{ init.gpa, image, min_confidence });
+        const detections = here.call(.detectObjects, .{ init.gpa, init.io, image, min_confidence });
         const elapsed = start.untilNow(init.io, .awake);
         const status = if (zimo.stats.hits > hits_before) "HIT " else "MISS";
 

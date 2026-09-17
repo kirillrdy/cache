@@ -21,13 +21,16 @@ pub fn build(b: *std.Build) void {
     });
     demo_mod.addImport("zigimg", zigimg_dep.module("zigimg"));
     demo_mod.addImport("zimo", zimo_mod);
-    demo_mod.link_libc = true;
 
-    const ort = b.dependency("onnxruntime", .{
+    const onnx = b.dependency("onnx", .{
         .target = target,
         .optimize = optimize,
+        .backend = b.option([]const u8, "backend", "GPU backend for inference: opencl (default), cuda, or metal") orelse "opencl",
+        // The model works in pixel coordinates of the full image, which are
+        // past what a half holds exactly.
+        .half = false,
     });
-    demo_mod.linkLibrary(ort.artifact("onnxruntime"));
+    demo_mod.addImport("onnx", onnx.module("onnx"));
 
     const demo = b.addExecutable(.{ .name = "demo", .root_module = demo_mod });
     b.installArtifact(demo);

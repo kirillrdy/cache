@@ -148,8 +148,10 @@ fn hashInt(h: *Hash, comptime T: type, v: T) void {
 /// Canonical encoding of a value: two values hash the same exactly when a pure
 /// function cannot tell them apart.
 fn hashValue(h: *Hash, comptime T: type, v: T) void {
-    if (T == std.mem.Allocator) {
-        h.update("std.mem.Allocator");
+    // An allocator or an I/O interface is the environment a call runs in, not
+    // an input a pure function could depend on.
+    if (T == std.mem.Allocator or T == std.Io) {
+        h.update(@typeName(T));
         return;
     }
 
