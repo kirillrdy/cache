@@ -18,42 +18,14 @@ const identity = @import("identity.zig");
 const Hash = std.crypto.hash.sha2.Sha256;
 const native_endian = @import("builtin").cpu.arch.endian();
 
-fn declName(comptime Container: type, comptime target: anytype) []const u8 {
-    const T = @TypeOf(target);
-    switch (@typeInfo(T)) {
-        .enum_literal, .@"enum" => return @tagName(target),
-        .pointer => |p| switch (p.size) {
-            .slice => if (p.child == u8) return target,
-            .one => switch (@typeInfo(p.child)) {
-                .array => |a| if (a.child == u8) return target,
-                else => {},
-            },
-            else => {},
-        },
-        .@"fn" => {
-            const info = @typeInfo(Container);
-            inline for (info.@"struct".decls) |decl| {
-                if (@hasDecl(Container, decl.name)) {
-                    const val = @field(Container, decl.name);
-                    if (@TypeOf(val) == T and val == target) {
-                        return decl.name;
-                    }
-                }
-            }
-            @compileError("zimo: could not find public declaration matching function. Use .name or \"name\"");
-        },
-        else => {},
-    }
-    @compileError("zimo: expected function identifier (.name, \"name\", or fn), got " ++ @typeName(T));
+/// The declaration a `.name` or `"name"` target refers to.
+fn declName(comptime target: anytype) []const u8 {
+    return switch (@typeInfo(@TypeOf(target))) {
+        .enum_literal => @tagName(target),
+        .pointer => target,
+        else => @compileError("zimo: expected .name or \"name\", got " ++ @typeName(@TypeOf(target))),
+    };
 }
-
-fn ReturnType(comptime Container: type, comptime target: anytype) type {
-    const name = declName(Container, target);
-    const f = @field(Container, name);
-    return @typeInfo(@TypeOf(f)).@"fn".return_type.?;
-}
-
-pub const bind = Source;
 
 /// Binds a container scope and its source text, so each cached function costs one line.
 ///
@@ -62,29 +34,20 @@ pub const bind = Source;
 ///
 /// The identity is derived from that source at compile time, so there is no
 /// generated file to import and no build step to forget.
-pub fn Source(comptime Container: type, comptime source: []const u8) type {
+pub fn bind(comptime Container: type, comptime source: []const u8) type {
     return struct {
-        /// Directly call the memoised form of `target` (.name, "name", or pub fn).
-        ///
-        ///     here.call(.slowFib, .{34});
-        pub fn call(comptime target: anytype, args: anytype) ReturnType(Container, target) {
-            const name = comptime declName(Container, target);
-            const f = @field(Container, name);
-            const id_str = comptime identity.of(source, name);
-            return Memo(id_str, f).call(args);
+        /// Call the memoised form of `target`.
+        pub fn call(comptime target: anytype, args: anytype) ReturnOf(target) {
+            return Memo(id(target), @field(Container, declName(target))).call(args);
         }
 
-        /// The memoised form of `target` (.name, "name", or pub fn), keyed on its source.
-        pub fn memo(comptime target: anytype) @TypeOf(Memo("", @field(Container, declName(Container, target))).call) {
-            const name = comptime declName(Container, target);
-            const f = @field(Container, name);
-            return Memo(identity.of(source, name), f).call;
-        }
-
-        /// The cache identity of `target` (.name, "name", or pub fn), for display.
+        /// The cache identity of `target`, for display.
         pub fn id(comptime target: anytype) []const u8 {
-            const name = comptime declName(Container, target);
-            return identity.of(source, name);
+            return identity.of(source, declName(target));
+        }
+
+        fn ReturnOf(comptime target: anytype) type {
+            return @typeInfo(@TypeOf(@field(Container, declName(target)))).@"fn".return_type.?;
         }
     };
 }
@@ -92,23 +55,21 @@ pub fn Source(comptime Container: type, comptime source: []const u8) type {
 pub const Stats = struct { hits: usize = 0, misses: usize = 0 };
 pub var stats: Stats = .{};
 
-var g_allocator: ?std.mem.Allocator = null;
-var g_io: ?std.Io = null;
-var g_dir: ?std.Io.Dir = null;
+const Store = struct { allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir };
+var store: ?Store = null;
 
 /// Point the cache at a directory. Entries survive across processes.
 pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
-    const cwd = std.Io.Dir.cwd();
-    g_dir = try cwd.createDirPathOpen(io, path, .{});
-    g_io = io;
-    g_allocator = allocator;
+    store = .{
+        .allocator = allocator,
+        .io = io,
+        .dir = try std.Io.Dir.cwd().createDirPathOpen(io, path, .{}),
+    };
 }
 
 pub fn close() void {
-    if (g_dir) |*d| d.close(g_io.?);
-    g_dir = null;
-    g_io = null;
-    g_allocator = null;
+    if (store) |*s| s.dir.close(s.io);
+    store = null;
 }
 
 // ------------------------------------------------------------ comptime ---
@@ -145,7 +106,7 @@ fn floatBits(comptime T: type, v: T) std.meta.Int(.unsigned, @bitSizeOf(T)) {
 fn plainBytes(comptime T: type) bool {
     if (native_endian != .little) return false;
     return switch (@typeInfo(T)) {
-        .int => |i| i.bits % 8 == 0 and @sizeOf(T) * 8 == i.bits,
+        .int => |i| @sizeOf(T) * 8 == i.bits,
         else => false,
     };
 }
@@ -178,6 +139,12 @@ fn hashElems(h: *Hash, comptime T: type, elems: []const T) void {
     }
 }
 
+fn hashInt(h: *Hash, comptime T: type, v: T) void {
+    var buf: [@divExact(@bitSizeOf(T), 8)]u8 = undefined;
+    std.mem.writeInt(T, &buf, v, .little);
+    h.update(&buf);
+}
+
 /// Canonical encoding of a value: two values hash the same exactly when a pure
 /// function cannot tell them apart.
 fn hashValue(h: *Hash, comptime T: type, v: T) void {
@@ -193,9 +160,7 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
         // two argument tuples that a pure function cannot tell apart would
         // otherwise get different keys.
         .@"struct" => |s| {
-            var count: [8]u8 = undefined;
-            std.mem.writeInt(u64, &count, s.fields.len, .little);
-            h.update(&count);
+            hashInt(h, u64, s.fields.len);
             inline for (s.fields) |f| {
                 h.update(f.name);
                 hashValue(h, f.type, @field(v, f.name));
@@ -210,24 +175,13 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
     switch (@typeInfo(T)) {
         .void => {},
         .bool => h.update(&[_]u8{@intFromBool(v)}),
-        .int => {
-            var buf: [@sizeOf(T)]u8 = undefined;
-            std.mem.writeInt(T, &buf, v, .little);
-            h.update(&buf);
-        },
-        .@"enum" => |e| hashValue(h, e.tag_type, @intFromEnum(v)),
-        .float => |f| {
-            const Bits = std.meta.Int(.unsigned, f.bits);
-            var buf: [@divExact(f.bits, 8)]u8 = undefined;
-            std.mem.writeInt(Bits, &buf, floatBits(T, v), .little);
-            h.update(&buf);
-        },
-        .optional => {
-            if (v) |inner| {
-                h.update(&[_]u8{1});
-                hashValue(h, @typeInfo(T).optional.child, inner);
-            } else h.update(&[_]u8{0});
-        },
+        .int => hashInt(h, T, v),
+        .@"enum" => |e| hashInt(h, e.tag_type, @intFromEnum(v)),
+        .float => |f| hashInt(h, std.meta.Int(.unsigned, f.bits), floatBits(T, v)),
+        .optional => |o| if (v) |inner| {
+            h.update(&[_]u8{1});
+            hashValue(h, o.child, inner);
+        } else h.update(&[_]u8{0}),
         .array => |a| hashElems(h, a.child, &v),
         .pointer => |p| switch (p.size) {
             // Contents, not address: identity is not observable to a pure
@@ -238,9 +192,7 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
                 hashValue(h, p.child, v.*);
             },
             .slice => {
-                var len_buf: [8]u8 = undefined;
-                std.mem.writeInt(u64, &len_buf, v.len, .little);
-                h.update(&len_buf);
+                hashInt(h, u64, v.len);
                 hashElems(h, p.child, v);
             },
             .many, .c => @compileError("zimo: cannot hash " ++ @typeName(T) ++
@@ -253,12 +205,6 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
 
 // ---------------------------------------------------------------- memo ---
 
-fn hexKey(digest: [32]u8) [64]u8 {
-    var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
-    return hex;
-}
-
 /// The cache key for one call: the function's identity plus its arguments.
 pub fn keyFor(comptime id: []const u8, args: anytype) [64]u8 {
     var h = Hash.init(.{});
@@ -266,7 +212,7 @@ pub fn keyFor(comptime id: []const u8, args: anytype) [64]u8 {
     hashValue(&h, @TypeOf(args), args);
     var digest: [32]u8 = undefined;
     h.final(&digest);
-    return hexKey(digest);
+    return std.fmt.bytesToHex(digest, .lower);
 }
 
 /// Wraps `f` in a memoised function. Call as `Memo(id, f).call(.{ a, b })`.
@@ -293,66 +239,36 @@ pub fn Memo(comptime id: []const u8, comptime f: anytype) type {
     };
 }
 
-fn get(comptime R: type, key: [64]u8) ?R {
-    const io = g_io orelse return null;
-    const dir = g_dir orelse return null;
-    const allocator = g_allocator orelse return null;
+/// A slice result is stored as its raw elements; anything else as its bytes.
+/// `assertStorable` guarantees the only pointer type that gets here is a slice.
+fn isSlice(comptime R: type) bool {
+    return @typeInfo(R) == .pointer;
+}
 
-    switch (@typeInfo(R)) {
-        .pointer => |p| switch (p.size) {
-            .slice => {
-                const Elem = p.child;
-                const n = dir.readFileAlloc(io, &key, allocator, .limited(64 * 1024 * 1024)) catch return null;
-                if (n.len % @sizeOf(Elem) != 0) {
-                    allocator.free(n);
-                    return null;
-                }
-                const count = n.len / @sizeOf(Elem);
-                if (count == 0) {
-                    allocator.free(n);
-                    return &.{};
-                }
-                const out = allocator.alloc(Elem, count) catch {
-                    allocator.free(n);
-                    return null;
-                };
-                @memcpy(std.mem.sliceAsBytes(out), n);
-                allocator.free(n);
-                return out;
-            },
-            else => return null,
-        },
-        else => {
-            var buf: [@sizeOf(R)]u8 = undefined;
-            const n = dir.readFileAlloc(io, &key, allocator, .limited(@sizeOf(R) + 1)) catch return null;
-            defer allocator.free(n);
-            if (n.len != @sizeOf(R)) return null;
-            @memcpy(&buf, n);
-            return std.mem.bytesToValue(R, &buf);
-        },
+fn get(comptime R: type, key: [64]u8) ?R {
+    const s = store orelse return null;
+
+    if (comptime isSlice(R)) {
+        const Elem = @typeInfo(R).pointer.child;
+        const bytes = s.dir.readFileAllocOptions(s.io, &key, s.allocator, .limited(64 * 1024 * 1024), .of(Elem), null) catch return null;
+        if (bytes.len % @sizeOf(Elem) != 0) {
+            s.allocator.free(bytes);
+            return null;
+        }
+        return std.mem.bytesAsSlice(Elem, bytes);
     }
+
+    // One spare byte so a file longer than the value is also rejected.
+    var buf: [@sizeOf(R) + 1]u8 = undefined;
+    const bytes = s.dir.readFile(s.io, &key, &buf) catch return null;
+    if (bytes.len != @sizeOf(R)) return null;
+    return std.mem.bytesToValue(R, buf[0..@sizeOf(R)]);
 }
 
 fn put(comptime R: type, key: [64]u8, value: R) void {
-    const io = g_io orelse return;
-    const dir = g_dir orelse return;
-
-    switch (@typeInfo(R)) {
-        .pointer => |p| switch (p.size) {
-            .slice => {
-                const bytes = std.mem.sliceAsBytes(value);
-                dir.writeFile(io, .{ .sub_path = &key, .data = bytes }) catch {};
-            },
-            else => {},
-        },
-        else => {
-            // Zeroed first so struct padding never reaches the file as undefined
-            // memory.
-            var buf: [@sizeOf(R)]u8 = @splat(0);
-            @memcpy(&buf, std.mem.asBytes(&value));
-            dir.writeFile(io, .{ .sub_path = &key, .data = &buf }) catch {};
-        },
-    }
+    const s = store orelse return;
+    const bytes = if (comptime isSlice(R)) std.mem.sliceAsBytes(value) else std.mem.asBytes(&value);
+    s.dir.writeFile(s.io, .{ .sub_path = &key, .data = bytes }) catch {};
 }
 
 // --------------------------------------------------------------- tests ---
@@ -452,7 +368,7 @@ test "memo without a store still returns correct results" {
     try testing.expectEqual(@as(u32, 42), Memo("id", f).call(.{21}));
 }
 
-test "Source ergonomics: .symbol, string, and function" {
+test "bind: .symbol and string targets, pub or private" {
     const Mod = struct {
         pub fn inc(n: u32) u32 {
             return n + 1;
@@ -461,34 +377,13 @@ test "Source ergonomics: .symbol, string, and function" {
             return n - 1;
         }
     };
-    const src = "pub fn inc(n: u32) u32 { return n + 1; } fn dec(n: u32) u32 { return n - 1; }";
-    const here = Source(Mod, src);
+    const here = bind(Mod, "pub fn inc(n: u32) u32 { return n + 1; } fn dec(n: u32) u32 { return n - 1; }");
 
-    // 1. Enum literal / symbol
-    const memo_inc_sym = here.memo(.inc);
-    try testing.expectEqual(@as(u32, 11), memo_inc_sym(.{10}));
-
-    // 2. String
-    const memo_inc_str = here.memo("inc");
-    try testing.expectEqual(@as(u32, 11), memo_inc_str(.{10}));
-
-    // 3. Function value
-    const memo_inc_fn = here.memo(Mod.inc);
-    try testing.expectEqual(@as(u32, 11), memo_inc_fn(.{10}));
-
-    // Private function works with .symbol and string
-    const memo_dec_sym = here.memo(.dec);
-    try testing.expectEqual(@as(u32, 9), memo_dec_sym(.{10}));
-
-    const memo_dec_str = here.memo("dec");
-    try testing.expectEqual(@as(u32, 9), memo_dec_str(.{10}));
-
-    // 4. Direct call via here.call or const cache = here.call
-    const cache = here.call;
-    try testing.expectEqual(@as(u32, 11), cache(.inc, .{10}));
-    try testing.expectEqual(@as(u32, 11), cache("inc", .{10}));
-    try testing.expectEqual(@as(u32, 11), cache(Mod.inc, .{10}));
-    try testing.expectEqual(@as(u32, 9), cache(.dec, .{10}));
+    try testing.expectEqual(@as(u32, 11), here.call(.inc, .{10}));
+    try testing.expectEqual(@as(u32, 11), here.call("inc", .{10}));
+    try testing.expectEqual(@as(u32, 9), here.call(.dec, .{10}));
+    try testing.expectEqual(@as(u32, 9), here.call("dec", .{10}));
+    try testing.expect(!std.mem.eql(u8, here.id(.inc), here.id(.dec)));
 }
 
 test "slice return type with allocator parameter" {
@@ -509,11 +404,9 @@ test "slice return type with allocator parameter" {
             return buf;
         }
     };
-    const here = Source(Mod, "pub fn filterEvens(allocator: std.mem.Allocator, arr: []const u32) []const u32 { ... }");
+    const here = bind(Mod, "pub fn filterEvens(allocator: std.mem.Allocator, arr: []const u32) []const u32 { ... }");
     const input: []const u32 = &.{ 1, 2, 3, 4, 5, 6 };
     const res = here.call(.filterEvens, .{ testing.allocator, input });
     defer testing.allocator.free(res);
     try testing.expectEqualSlices(u32, &.{ 2, 4, 6 }, res);
 }
-
-

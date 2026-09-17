@@ -32,23 +32,8 @@ pub fn build(b: *std.Build) void {
     const demo = b.addExecutable(.{ .name = "demo", .root_module = demo_mod });
     b.installArtifact(demo);
 
-    const download_model = b.addSystemCommand(&.{
-        "curl",
-        "-sL",
-        "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/object_detection_segmentation/tiny-yolov3/model/tiny-yolov3-11.onnx",
-    });
-    const model_onnx = download_model.addPrefixedOutputFileArg("-o", "tiny-yolov3-11.onnx");
-    const install_model = b.addInstallFile(model_onnx, "models/tiny-yolov3-11.onnx");
-    b.getInstallStep().dependOn(&install_model.step);
-
-    const download_img = b.addSystemCommand(&.{
-        "curl",
-        "-sL",
-        "https://upload.wikimedia.org/wikipedia/commons/c/c5/Tokyo_Shibuya_Scramble_Crossing_2018-10-09.jpg",
-    });
-    const street_jpg = download_img.addPrefixedOutputFileArg("-o", "street.jpg");
-    const install_img = b.addInstallFile(street_jpg, "images/street.jpg");
-    b.getInstallStep().dependOn(&install_img.step);
+    fetch(b, "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/object_detection_segmentation/tiny-yolov3/model/tiny-yolov3-11.onnx", "models/tiny-yolov3-11.onnx");
+    fetch(b, "https://upload.wikimedia.org/wikipedia/commons/c/c5/Tokyo_Shibuya_Scramble_Crossing_2018-10-09.jpg", "images/street.jpg");
 
     const run_demo = b.addRunArtifact(demo);
     run_demo.step.dependOn(b.getInstallStep());
@@ -56,4 +41,11 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = zimo_mod });
     b.step("test", "Test the runtime").dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// Downloads `url` at build time and installs it at `dest` under the prefix.
+fn fetch(b: *std.Build, url: []const u8, dest: []const u8) void {
+    const curl = b.addSystemCommand(&.{ "curl", "-sL", url });
+    const file = curl.addPrefixedOutputFileArg("-o", std.fs.path.basename(dest));
+    b.getInstallStep().dependOn(&b.addInstallFile(file, dest).step);
 }
