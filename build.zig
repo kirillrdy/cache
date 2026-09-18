@@ -22,10 +22,15 @@ pub fn build(b: *std.Build) void {
     demo_mod.addImport("zigimg", zigimg_dep.module("zigimg"));
     demo_mod.addImport("zimo", zimo_mod);
 
+    const backend = b.option(
+        []const u8,
+        "backend",
+        "GPU backend for inference: opencl, cuda, or metal (defaults to metal on macOS and opencl elsewhere)",
+    ) orelse if (target.result.os.tag == .macos) "metal" else "opencl";
     const onnx = b.dependency("onnx", .{
         .target = target,
         .optimize = optimize,
-        .backend = b.option([]const u8, "backend", "GPU backend for inference: opencl (default), cuda, or metal") orelse "opencl",
+        .backend = backend,
         // The model works in pixel coordinates of the full image, which are
         // past what a half holds exactly.
         .half = false,

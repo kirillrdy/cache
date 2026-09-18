@@ -13,7 +13,7 @@ zig build test                       # runtime tests
 zig build run                        # object detection demo; run twice to see cache hit
 ```
 
-The demo needs nothing installed beyond a GPU driver. Inference runs on the [onnx](https://github.com/kirillrdy/onnx) package, a Zig ONNX runtime with OpenCL, CUDA and Metal backends (OpenCL by default; pass `-Dbackend=cuda` or `-Dbackend=metal`), and the model and test image are fetched by the build.
+The demo needs nothing installed beyond a GPU driver. Inference runs on the [onnx](https://github.com/kirillrdy/onnx) package, a Zig ONNX runtime with OpenCL, CUDA and Metal backends. It defaults to Metal on macOS and OpenCL elsewhere; pass `-Dbackend=opencl`, `-Dbackend=cuda`, or `-Dbackend=metal` to override it. The model and test image are fetched by the build.
 
 ## The key
 
