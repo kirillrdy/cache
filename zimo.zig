@@ -65,7 +65,7 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
 }
 
 pub fn close() void {
-    if (store) |*s| s.dir.close(s.io);
+    if (store) |s| s.dir.close(s.io);
     store = null;
 }
 
