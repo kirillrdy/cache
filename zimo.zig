@@ -25,17 +25,16 @@ const native_endian = @import("builtin").cpu.arch.endian();
 pub fn bind(comptime Container: type, comptime source: []const u8) type {
     return struct {
         /// Call the memoised form of `target`.
-        pub fn call(comptime target: @EnumLiteral(), args: anytype) ReturnOf(target) {
+        pub fn call(
+            comptime target: @EnumLiteral(),
+            args: anytype,
+        ) @typeInfo(@TypeOf(@field(Container, @tagName(target)))).@"fn".return_type.? {
             return Memo(id(target), @field(Container, @tagName(target))).call(args);
         }
 
         /// The cache identity of `target`, for display.
         pub fn id(comptime target: @EnumLiteral()) []const u8 {
             return identity.of(source, @tagName(target));
-        }
-
-        fn ReturnOf(comptime target: @EnumLiteral()) type {
-            return @typeInfo(@TypeOf(@field(Container, @tagName(target)))).@"fn".return_type.?;
         }
     };
 }
@@ -95,6 +94,16 @@ fn plainBytes(comptime T: type) bool {
     if (native_endian != .little) return false;
     return switch (@typeInfo(T)) {
         .int => |i| @sizeOf(T) * 8 == i.bits,
+        .@"struct" => |s| blk: {
+            if (s.layout == .@"packed") return @sizeOf(T) * 8 == @bitSizeOf(T);
+            var sum: usize = 0;
+            inline for (s.fields) |f| {
+                if (@sizeOf(f.type) == 0) continue;
+                if (!plainBytes(f.type)) break :blk false;
+                sum += @sizeOf(f.type);
+            }
+            break :blk sum == @sizeOf(T);
+        },
         else => false,
     };
 }
@@ -128,7 +137,12 @@ fn hashElems(h: *Hash, comptime T: type, elems: []const T) void {
 }
 
 fn hashInt(h: *Hash, comptime T: type, v: T) void {
-    var buf: [@divExact(@bitSizeOf(T), 8)]u8 = undefined;
+    const info = @typeInfo(T).int;
+    if (comptime info.bits % 8 != 0) {
+        const ByteInt = std.meta.Int(info.signedness, @divFloor(info.bits + 7, 8) * 8);
+        return hashInt(h, ByteInt, @as(ByteInt, v));
+    }
+    var buf: [@divExact(info.bits, 8)]u8 = undefined;
     std.mem.writeInt(T, &buf, v, .little);
     h.update(&buf);
 }
@@ -187,6 +201,20 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
             },
             .many, .c => @compileError("zimo: cannot hash " ++ @typeName(T) ++
                 "; its length is not known"),
+        },
+        .@"union" => |u| {
+            if (u.tag_type) |Tag| {
+                const tag = @as(Tag, v);
+                hashValue(h, Tag, tag);
+                switch (v) {
+                    inline else => |payload| {
+                        hashValue(h, @TypeOf(payload), payload);
+                    },
+                }
+            } else {
+                @compileError("zimo: cannot hash untagged union " ++ @typeName(T) ++
+                    "; it has no tag to identify its content");
+            }
         },
         else => @compileError("zimo: cannot hash " ++ @typeName(T) ++
             "; it has no content a pure function could depend on"),
@@ -401,3 +429,31 @@ test "slice return type with allocator parameter" {
     defer testing.allocator.free(res);
     try testing.expectEqualSlices(u32, &.{ 2, 4, 6 }, res);
 }
+
+test "tagged union arguments hash tag and payload" {
+    const Tagged = union(enum) {
+        a: u32,
+        b: []const u8,
+        c: void,
+    };
+
+    const v1: Tagged = .{ .a = 42 };
+    const v2: Tagged = .{ .a = 42 };
+    const v3: Tagged = .{ .a = 43 };
+    const v4: Tagged = .{ .b = "hello" };
+    const v5: Tagged = .{ .c = {} };
+
+    try testing.expectEqual(keyFor("id", .{v1}), keyFor("id", .{v2}));
+    try testing.expect(!std.mem.eql(u8, &keyFor("id", .{v1}), &keyFor("id", .{v3})));
+    try testing.expect(!std.mem.eql(u8, &keyFor("id", .{v1}), &keyFor("id", .{v4})));
+    try testing.expect(!std.mem.eql(u8, &keyFor("id", .{v4}), &keyFor("id", .{v5})));
+}
+
+test "arbitrary bit-width integer hashing" {
+    const a: u1 = 1;
+    const b: u1 = 1;
+    const c: u1 = 0;
+    try testing.expectEqual(keyFor("id", .{a}), keyFor("id", .{b}));
+    try testing.expect(!std.mem.eql(u8, &keyFor("id", .{a}), &keyFor("id", .{c})));
+}
+

@@ -18,7 +18,7 @@ The demo needs nothing installed beyond a GPU driver. Inference runs on the [onn
 ## The key
 
 ```
-key = sha256( function identity || canonical encoding of the arguments )
+key = xxhash3( function identity || canonical encoding of the arguments )
 ```
 
 **Function identity** is not just the checksum of a single function body. A cache keyed on that would go stale the moment a helper function, constant, or type definition changes. Instead, it is a checksum computed over the target function **and every top-level declaration it transitively references**: callees, constants, and type declarations.

@@ -23,12 +23,6 @@ pub const CLASS_NAMES = [_][]const u8{
     "toaster",      "sink",      "refrigerator",  "book",       "clock",        "vase",           "scissors",   "teddy bear", "hair drier",    "toothbrush",
 };
 
-pub const Image = struct {
-    width: u32,
-    height: u32,
-    pixels: []const u8,
-};
-
 pub const Detection = struct {
     class_id: u32,
     confidence: f32,
@@ -38,14 +32,14 @@ pub const Detection = struct {
     y2: f32,
 };
 
-pub fn detectObjects(allocator: std.mem.Allocator, io: std.Io, image: Image, min_confidence: f32) []Detection {
+pub fn detectObjects(allocator: std.mem.Allocator, io: std.Io, image: zigimg.Image, min_confidence: f32) []Detection {
     return runModel(allocator, io, image, min_confidence) catch |err| {
         std.debug.print("inference failed: {t}: {s}\n", .{ err, onnx.lastError() });
         return &.{};
     };
 }
 
-fn runModel(allocator: std.mem.Allocator, io: std.Io, image: Image, min_confidence: f32) ![]Detection {
+fn runModel(allocator: std.mem.Allocator, io: std.Io, image: zigimg.Image, min_confidence: f32) ![]Detection {
     const env = try onnx.Env.init(allocator, io);
     defer env.deinit();
     const session = try onnx.Session.open(env, model_path);
@@ -98,7 +92,7 @@ fn runModel(allocator: std.mem.Allocator, io: std.Io, image: Image, min_confiden
     return allocator.dupe(Detection, found[0..count]);
 }
 
-fn letterbox(image: Image, out: *[input_len]f32) void {
+fn letterbox(image: zigimg.Image, out: *[input_len]f32) void {
     @memset(out, 128.0 / 255.0);
 
     const src_w: f32 = @floatFromInt(image.width);
@@ -109,6 +103,7 @@ fn letterbox(image: Image, out: *[input_len]f32) void {
     const pad_x = (model_size - dst_w) / 2;
     const pad_y = (model_size - dst_h) / 2;
     const plane = model_size * model_size;
+    const raw = image.rawBytes();
 
     for (0..dst_h) |y| {
         const src_y = (y * image.height) / dst_h;
@@ -117,33 +112,28 @@ fn letterbox(image: Image, out: *[input_len]f32) void {
             const src_x = (x * image.width) / dst_w;
             const src_idx = (src_y * image.width + src_x) * 3;
             for (0..3) |ch| {
-                out[ch * plane + dst_row + x] = @as(f32, @floatFromInt(image.pixels[src_idx + ch])) / 255.0;
+                out[ch * plane + dst_row + x] = @as(f32, @floatFromInt(raw[src_idx + ch])) / 255.0;
             }
         }
     }
 }
 
-fn clamp(v: f32, max: u32) f32 {
+fn clamp(v: f32, max: usize) f32 {
     return std.math.clamp(v, 0.0, @as(f32, @floatFromInt(max - 1)));
 }
 
-fn loadImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Image {
+fn loadImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !zigimg.Image {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
     defer allocator.free(bytes);
 
     var img = try zigimg.Image.fromMemory(allocator, bytes);
-    defer img.deinit(allocator);
+    errdefer img.deinit(allocator);
     try img.convert(allocator, .rgb24);
-
-    return .{
-        .width = @intCast(img.width),
-        .height = @intCast(img.height),
-        .pixels = try allocator.dupe(u8, img.rawBytes()),
-    };
+    return img;
 }
 
-fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8, image: Image, detections: []const Detection) !void {
-    const pixels = try allocator.dupe(u8, image.pixels);
+fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8, image: zigimg.Image, detections: []const Detection) !void {
+    const pixels = try allocator.dupe(u8, image.rawBytes());
     defer allocator.free(pixels);
     const rgb = std.mem.bytesAsSlice(zigimg.color.Rgb24, pixels);
 
@@ -182,10 +172,10 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("identity: detectObjects={s}\n\n", .{here.id(.detectObjects)[0..16]});
 
-    const image = try loadImage(init.gpa, init.io, image_path);
-    defer init.gpa.free(image.pixels);
+    var image = try loadImage(init.gpa, init.io, image_path);
+    defer image.deinit(init.gpa);
 
-    std.debug.print("Loaded {s} ({d}x{d}, {d} bytes)\n\n", .{ image_path, image.width, image.height, image.pixels.len });
+    std.debug.print("Loaded {s} ({d}x{d}, {d} bytes)\n\n", .{ image_path, image.width, image.height, image.rawBytes().len });
 
     var first_result: []Detection = &.{};
     defer init.gpa.free(first_result);

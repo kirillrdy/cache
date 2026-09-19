@@ -10,18 +10,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const demo_mod = b.createModule(.{
-        .root_source_file = b.path("demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const zigimg_dep = b.dependency("zigimg", .{
         .target = target,
         .optimize = optimize,
     });
-    demo_mod.addImport("zigimg", zigimg_dep.module("zigimg"));
-    demo_mod.addImport("zimo", zimo_mod);
-
     const backend = b.option(
         []const u8,
         "backend",
@@ -35,9 +27,20 @@ pub fn build(b: *std.Build) void {
         // past what a half holds exactly.
         .half = false,
     });
-    demo_mod.addImport("onnx", onnx.module("onnx"));
 
-    const demo = b.addExecutable(.{ .name = "demo", .root_module = demo_mod });
+    const demo = b.addExecutable(.{
+        .name = "demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigimg", .module = zigimg_dep.module("zigimg") },
+                .{ .name = "zimo", .module = zimo_mod },
+                .{ .name = "onnx", .module = onnx.module("onnx") },
+            },
+        }),
+    });
     b.installArtifact(demo);
 
     fetch(b, "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/object_detection_segmentation/tiny-yolov3/model/tiny-yolov3-11.onnx", "models/tiny-yolov3-11.onnx");
@@ -54,6 +57,6 @@ pub fn build(b: *std.Build) void {
 /// Downloads `url` at build time and installs it at `dest` under the prefix.
 fn fetch(b: *std.Build, url: []const u8, dest: []const u8) void {
     const curl = b.addSystemCommand(&.{ "curl", "-sL", url });
-    const file = curl.addPrefixedOutputFileArg("-o", std.fs.path.basename(dest));
+    const file = curl.addPrefixedOutputFileArg("-o", std.Io.Dir.path.basename(dest));
     b.getInstallStep().dependOn(&b.addInstallFile(file, dest).step);
 }

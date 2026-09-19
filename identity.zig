@@ -70,9 +70,9 @@ pub fn of(comptime source: []const u8, comptime name: []const u8) []const u8 {
         var digest: [32]u8 = undefined;
         h.final(&digest);
 
-        break :blk std.fmt.comptimePrint("{x}", .{&digest});
+        break :blk std.fmt.bytesToHex(digest, .lower);
     };
-    return hex;
+    return &hex;
 }
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
@@ -89,122 +89,110 @@ fn find(decls: []const Decl, name: []const u8) ?Decl {
     return null;
 }
 
-fn tokenize(comptime source: []const u8) []const Tok {
-    comptime {
-        // Slice out of the same sentinel-terminated buffer the tokenizer saw,
-        // so a token that runs to the end stays in bounds.
-        const buf = source ++ "\x00";
-        var it: Tokenizer = .init(buf);
-        var toks: []const Tok = &.{};
-        while (true) {
-            const t = it.next();
-            if (t.tag == .eof) break;
-            toks = toks ++ [_]Tok{.{
-                .tag = t.tag,
-                .text = buf[t.loc.start..t.loc.end],
-            }};
-        }
-        return toks;
+fn tokenize(source: []const u8) []const Tok {
+    // Slice out of the same sentinel-terminated buffer the tokenizer saw,
+    // so a token that runs to the end stays in bounds.
+    const buf = source ++ "\x00";
+    var it: Tokenizer = .init(buf);
+    var toks: []const Tok = &.{};
+    while (true) {
+        const t = it.next();
+        if (t.tag == .eof) break;
+        toks = toks ++ [_]Tok{.{
+            .tag = t.tag,
+            .text = buf[t.loc.start..t.loc.end],
+        }};
     }
+    return toks;
 }
 
 /// Container-level declarations, found by tracking brace depth. A declaration
 /// starts at `const` / `var` / `fn` at depth zero and runs to the `;` or `}`
 /// that closes it.
-fn collect(comptime source: []const u8) []const Decl {
-    comptime {
-        const toks = tokenize(source);
-        var decls: []const Decl = &.{};
+fn collect(source: []const u8) []const Decl {
+    const toks = tokenize(source);
+    var decls: []const Decl = &.{};
 
-        var i: usize = 0;
-        while (i < toks.len) {
-            switch (toks[i].tag) {
-                .keyword_const, .keyword_var, .keyword_fn => {},
-                else => {
-                    i += 1;
-                    continue;
-                },
-            }
-            if (i + 1 >= toks.len or toks[i + 1].tag != .identifier) {
+    var i: usize = 0;
+    while (i < toks.len) {
+        switch (toks[i].tag) {
+            .keyword_const, .keyword_var, .keyword_fn => {},
+            else => {
                 i += 1;
                 continue;
-            }
-
-            const start = declStart(toks, i);
-            const name = toks[i + 1].text;
-            const end = declEnd(toks, i);
-
-            decls = decls ++ [_]Decl{.{
-                .name = name,
-                .canonical = canonical(toks[start .. end + 1]),
-                .refs = identifiers(toks[start .. end + 1]),
-            }};
-            i = end + 1;
+            },
         }
-        return decls;
+        if (i + 1 >= toks.len or toks[i + 1].tag != .identifier) {
+            i += 1;
+            continue;
+        }
+
+        const start = declStart(toks, i);
+        const name = toks[i + 1].text;
+        const end = declEnd(toks, i);
+
+        decls = decls ++ [_]Decl{.{
+            .name = name,
+            .canonical = canonical(toks[start .. end + 1]),
+            .refs = identifiers(toks[start .. end + 1]),
+        }};
+        i = end + 1;
     }
+    return decls;
 }
 
 /// Walk back over the modifiers that belong to the declaration, so that
 /// changing `pub` or `export` is part of its identity.
-fn declStart(comptime toks: []const Tok, comptime kw: usize) usize {
-    comptime {
-        var s = kw;
-        while (s > 0) {
-            switch (toks[s - 1].tag) {
-                .keyword_pub, .keyword_export, .keyword_extern, .keyword_inline, .keyword_threadlocal => s -= 1,
-                else => break,
-            }
+fn declStart(toks: []const Tok, kw: usize) usize {
+    var s = kw;
+    while (s > 0) {
+        switch (toks[s - 1].tag) {
+            .keyword_pub, .keyword_export, .keyword_extern, .keyword_inline, .keyword_threadlocal => s -= 1,
+            else => break,
         }
-        return s;
     }
+    return s;
 }
 
-fn declEnd(comptime toks: []const Tok, comptime kw: usize) usize {
-    comptime {
-        var depth: usize = 0;
-        var i = kw;
-        while (i < toks.len) : (i += 1) {
-            switch (toks[i].tag) {
-                .l_brace, .l_paren, .l_bracket => depth += 1,
-                .r_brace, .r_paren, .r_bracket => {
-                    depth -= 1;
-                    // A declaration whose body is a block ends at its closing
-                    // brace, with no trailing semicolon.
-                    if (depth == 0 and toks[i].tag == .r_brace and
-                        (i + 1 >= toks.len or toks[i + 1].tag != .semicolon)) return i;
-                },
-                .semicolon => if (depth == 0) return i,
-                else => {},
-            }
+fn declEnd(toks: []const Tok, kw: usize) usize {
+    var depth: usize = 0;
+    var i = kw;
+    while (i < toks.len) : (i += 1) {
+        switch (toks[i].tag) {
+            .l_brace, .l_paren, .l_bracket => depth += 1,
+            .r_brace, .r_paren, .r_bracket => {
+                depth -= 1;
+                // A declaration whose body is a block ends at its closing
+                // brace, with no trailing semicolon.
+                if (depth == 0 and toks[i].tag == .r_brace and
+                    (i + 1 >= toks.len or toks[i + 1].tag != .semicolon)) return i;
+            },
+            .semicolon => if (depth == 0) return i,
+            else => {},
         }
-        return toks.len - 1;
     }
+    return toks.len - 1;
 }
 
 /// The token text alone, one per line. The tag is left out: it is a function
 /// of the text for every token the tokenizer can produce, and its name is
 /// longer than the token it labels, which at compile time costs more in string
 /// building and hashing than the whole rest of the walk.
-fn canonical(comptime toks: []const Tok) []const u8 {
-    comptime {
-        var out: []const u8 = "";
-        for (toks) |t| {
-            if (t.tag == .doc_comment) continue;
-            out = out ++ t.text ++ "\n";
-        }
-        return out;
+fn canonical(toks: []const Tok) []const u8 {
+    var out: []const u8 = "";
+    for (toks) |t| {
+        if (t.tag == .doc_comment) continue;
+        out = out ++ t.text ++ "\n";
     }
+    return out;
 }
 
-fn identifiers(comptime toks: []const Tok) []const []const u8 {
-    comptime {
-        var out: []const []const u8 = &.{};
-        for (toks) |t| {
-            if (t.tag != .identifier) continue;
-            if (contains(out, t.text)) continue;
-            out = out ++ [_][]const u8{t.text};
-        }
-        return out;
+fn identifiers(toks: []const Tok) []const []const u8 {
+    var out: []const []const u8 = &.{};
+    for (toks) |t| {
+        if (t.tag != .identifier) continue;
+        if (contains(out, t.text)) continue;
+        out = out ++ [_][]const u8{t.text};
     }
+    return out;
 }
