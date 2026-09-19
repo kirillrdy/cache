@@ -15,15 +15,6 @@ const identity = @import("identity.zig");
 const Hash = std.hash.XxHash3;
 const native_endian = @import("builtin").cpu.arch.endian();
 
-/// The declaration a `.name` or `"name"` target refers to.
-fn declName(comptime target: anytype) []const u8 {
-    return switch (@typeInfo(@TypeOf(target))) {
-        .enum_literal => @tagName(target),
-        .pointer => target,
-        else => @compileError("zimo: expected .name or \"name\", got " ++ @typeName(@TypeOf(target))),
-    };
-}
-
 /// Binds a container scope and its source text, so each cached function costs one line.
 ///
 ///     const here = zimo.bind(@This(), @embedFile("demo.zig"));
@@ -34,17 +25,17 @@ fn declName(comptime target: anytype) []const u8 {
 pub fn bind(comptime Container: type, comptime source: []const u8) type {
     return struct {
         /// Call the memoised form of `target`.
-        pub fn call(comptime target: anytype, args: anytype) ReturnOf(target) {
-            return Memo(id(target), @field(Container, declName(target))).call(args);
+        pub fn call(comptime target: @EnumLiteral(), args: anytype) ReturnOf(target) {
+            return Memo(id(target), @field(Container, @tagName(target))).call(args);
         }
 
         /// The cache identity of `target`, for display.
-        pub fn id(comptime target: anytype) []const u8 {
-            return identity.of(source, declName(target));
+        pub fn id(comptime target: @EnumLiteral()) []const u8 {
+            return identity.of(source, @tagName(target));
         }
 
-        fn ReturnOf(comptime target: anytype) type {
-            return @typeInfo(@TypeOf(@field(Container, declName(target)))).@"fn".return_type.?;
+        fn ReturnOf(comptime target: @EnumLiteral()) type {
+            return @typeInfo(@TypeOf(@field(Container, @tagName(target)))).@"fn".return_type.?;
         }
     };
 }
@@ -370,7 +361,7 @@ test "memo without a store still returns correct results" {
     try testing.expectEqual(@as(u32, 42), Memo("id", f).call(.{21}));
 }
 
-test "bind: .symbol and string targets, pub or private" {
+test "bind: enum literal targets, pub or private" {
     const Mod = struct {
         pub fn inc(n: u32) u32 {
             return n + 1;
@@ -382,9 +373,7 @@ test "bind: .symbol and string targets, pub or private" {
     const here = bind(Mod, "pub fn inc(n: u32) u32 { return n + 1; } fn dec(n: u32) u32 { return n - 1; }");
 
     try testing.expectEqual(@as(u32, 11), here.call(.inc, .{10}));
-    try testing.expectEqual(@as(u32, 11), here.call("inc", .{10}));
     try testing.expectEqual(@as(u32, 9), here.call(.dec, .{10}));
-    try testing.expectEqual(@as(u32, 9), here.call("dec", .{10}));
     try testing.expect(!std.mem.eql(u8, here.id(.inc), here.id(.dec)));
 }
 
