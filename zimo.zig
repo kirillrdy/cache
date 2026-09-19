@@ -3,7 +3,7 @@
 //! `Memo(id, f).call` wraps any function in a memoised one. `id` is the
 //! checksum derived for `f`; the cache key is
 //!
-//!     sha256( id || canonical encoding of the arguments )
+//!     xxhash3( id || canonical encoding of the arguments )
 //!
 //! Everything about the argument encoding and the result layout is resolved by
 //! `@typeInfo` at compile time. There is no reflection at run time and no
@@ -12,10 +12,7 @@
 
 const std = @import("std");
 const identity = @import("identity.zig");
-/// SHA-256, not one of the newer designs: on any CPU with the SHA extensions
-/// it runs at ~1.4 GB/s, and its small-input latency -- the common case for an
-/// argument tuple -- is several times lower than Blake3's.
-const Hash = std.crypto.hash.sha2.Sha256;
+const Hash = std.hash.XxHash3;
 const native_endian = @import("builtin").cpu.arch.endian();
 
 /// The declaration a `.name` or `"name"` target refers to.
@@ -207,14 +204,17 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
 
 // ---------------------------------------------------------------- memo ---
 
+pub const Key = [16]u8;
+
 /// The cache key for one call: the function's identity plus its arguments.
-pub fn keyFor(comptime id: []const u8, args: anytype) [64]u8 {
-    var h = Hash.init(.{});
+pub fn keyFor(comptime id: []const u8, args: anytype) Key {
+    var h = Hash.init(0);
     h.update(id);
     hashValue(&h, @TypeOf(args), args);
-    var digest: [32]u8 = undefined;
-    h.final(&digest);
-    return std.fmt.bytesToHex(digest, .lower);
+    const digest = h.final();
+    var hex: Key = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x:0>16}", .{digest}) catch unreachable;
+    return hex;
 }
 
 /// Wraps `f` in a memoised function. Call as `Memo(id, f).call(.{ a, b })`.
@@ -247,7 +247,7 @@ fn isSlice(comptime R: type) bool {
     return @typeInfo(R) == .pointer;
 }
 
-fn get(comptime R: type, key: [64]u8) ?R {
+fn get(comptime R: type, key: Key) ?R {
     const s = store orelse return null;
 
     if (comptime isSlice(R)) {
@@ -267,7 +267,7 @@ fn get(comptime R: type, key: [64]u8) ?R {
     return std.mem.bytesToValue(R, buf[0..@sizeOf(R)]);
 }
 
-fn put(comptime R: type, key: [64]u8, value: R) void {
+fn put(comptime R: type, key: Key, value: R) void {
     const s = store orelse return;
     const bytes = if (comptime isSlice(R)) std.mem.sliceAsBytes(value) else std.mem.asBytes(&value);
     s.dir.writeFile(s.io, .{ .sub_path = &key, .data = bytes }) catch {};
