@@ -75,12 +75,13 @@ The library requires no manual annotations or compiler directives. Deciding whet
 
 - **Arguments** must have hashable content (e.g. no `anytype`, no function pointers).
 - **Pointers and slices** in arguments are hashed by value/contents, not memory addresses.
-- **Results** must be storable (value types or slices). Single unmanaged pointers (`*T`) are rejected because their pointee lifetime cannot be safely restored across processes.
+- **Results** must be storable (value types, slices, error sets, or error unions of storable types). Single unmanaged pointers (`*T`) are rejected because their pointee lifetime cannot be safely restored across processes.
 - **Environment arguments** (`std.mem.Allocator`, `std.Io`) are recognized and left out of the key; a slice result is allocated with the allocator given to `zimo.open` on a cache hit.
 
 ## Supported types
 
-- **Value types** (integers, floats, bools, enums, arrays, structs) — hashed and stored by value.
+- **Value types** (integers, floats, bools, enums, error sets, arrays, structs) — hashed and stored by value.
+- **Error unions** (`!T`, `E!T`) — both error values and successful payloads are cached and restored identically.
 - **Slices** (`[]T`, `[]const u8`, etc.) — arguments hashed by element contents; slice return types are stored to disk and re-allocated via the caller's allocator on cache hits.
 - **Pointers** (`*const T`) — argument referents are dereferenced and hashed by content. Single pointer return types are rejected at compile time.
 - **Structs** — hashed structurally (field names, types, and values) rather than by `@typeName`, ensuring anonymous tuples with comptime values hash predictably.

@@ -32,14 +32,10 @@ pub const Detection = struct {
     y2: f32,
 };
 
-pub fn detectObjects(allocator: std.mem.Allocator, io: std.Io, image: zigimg.Image, min_confidence: f32) []Detection {
-    return runModel(allocator, io, image, min_confidence) catch |err| {
-        std.debug.print("inference failed: {t}: {s}\n", .{ err, onnx.lastError() });
-        return &.{};
-    };
-}
+pub fn detectObjects(allocator: std.mem.Allocator, io: std.Io, path: []const u8, min_confidence: f32) ![]Detection {
+    var image = try loadImage(allocator, io, path);
+    defer image.deinit(allocator);
 
-fn runModel(allocator: std.mem.Allocator, io: std.Io, image: zigimg.Image, min_confidence: f32) ![]Detection {
     const env = try onnx.Env.init(allocator, io);
     defer env.deinit();
     const session = try onnx.Session.open(env, model_path);
@@ -70,10 +66,10 @@ fn runModel(allocator: std.mem.Allocator, io: std.Io, image: zigimg.Image, min_c
     var found: [64]Detection = undefined;
     var count: usize = 0;
 
-    for (0..num_indices) |i| {
+    for (0..num_indices) |idx| {
         if (count >= found.len) break;
-        const class_id: usize = @intCast(indices[i * 3 + 1]);
-        const box_id: usize = @intCast(indices[i * 3 + 2]);
+        const class_id: usize = @intCast(indices[idx * 3 + 1]);
+        const box_id: usize = @intCast(indices[idx * 3 + 2]);
         const confidence = scores[class_id * num_boxes + box_id];
         if (confidence < min_confidence) continue;
 
@@ -132,10 +128,10 @@ fn loadImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !zigimg
     return img;
 }
 
-fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8, image: zigimg.Image, detections: []const Detection) !void {
-    const pixels = try allocator.dupe(u8, image.rawBytes());
-    defer allocator.free(pixels);
-    const rgb = std.mem.bytesAsSlice(zigimg.color.Rgb24, pixels);
+fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8, output_path: []const u8, detections: []const Detection) !void {
+    var image = try loadImage(allocator, io, input_path);
+    defer image.deinit(allocator);
+    const rgb = image.pixels.rgb24;
 
     for (detections) |d| {
         const color = if (d.class_id == 0) zigimg.color.Rgb24{ .r = 0, .g = 255, .b = 0 } else zigimg.color.Rgb24{ .r = 0, .g = 180, .b = 255 };
@@ -155,15 +151,9 @@ fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, path: []const u8
         }
     }
 
-    const annotated: zigimg.Image = .{
-        .width = image.width,
-        .height = image.height,
-        .pixels = .{ .rgb24 = rgb },
-    };
-
     const write_buf = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(write_buf);
-    try annotated.writeToFilePath(allocator, io, path, write_buf, .{ .jpeg = .{ .quality = 85 } });
+    try image.writeToFilePath(allocator, io, output_path, write_buf, .{ .jpeg = .{ .quality = 85 } });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -172,11 +162,6 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("identity: detectObjects={s}\n\n", .{here.id(.detectObjects)[0..16]});
 
-    var image = try loadImage(init.gpa, init.io, image_path);
-    defer image.deinit(init.gpa);
-
-    std.debug.print("Loaded {s} ({d}x{d}, {d} bytes)\n\n", .{ image_path, image.width, image.height, image.rawBytes().len });
-
     var first_result: []Detection = &.{};
     defer init.gpa.free(first_result);
 
@@ -184,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
         const hits_before = zimo.stats.hits;
         const start = std.Io.Timestamp.now(init.io, .awake);
 
-        const detections = here.call(.detectObjects, .{ init.gpa, init.io, image, min_confidence });
+        const detections = try here.call(.detectObjects, .{ init.gpa, init.io, image_path, min_confidence });
         const elapsed = start.untilNow(init.io, .awake);
         const status = if (zimo.stats.hits > hits_before) "HIT " else "MISS";
 
@@ -210,6 +195,6 @@ pub fn main(init: std.process.Init) !void {
         if (run == 0) first_result = detections else init.gpa.free(detections);
     }
 
-    try saveAnnotatedImage(init.gpa, init.io, annotated_path, image, first_result);
+    try saveAnnotatedImage(init.gpa, init.io, image_path, annotated_path, first_result);
     std.debug.print("\nhits={d} misses={d}\nSaved annotated image to {s}\n", .{ zimo.stats.hits, zimo.stats.misses, annotated_path });
 }

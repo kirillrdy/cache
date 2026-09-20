@@ -65,7 +65,8 @@ pub fn close() void {
 /// later process, where any pointer it held would be meaningless.
 fn assertStorable(comptime T: type) void {
     switch (@typeInfo(T)) {
-        .int, .float, .bool, .void, .@"enum" => {},
+        .int, .float, .bool, .void, .@"enum", .error_set => {},
+        .error_union => |eu| assertStorable(eu.payload),
         .@"struct" => |s| for (s.fields) |f| assertStorable(f.type),
         .array => |a| assertStorable(a.child),
         .optional => |o| assertStorable(o.child),
@@ -216,6 +217,16 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
                     "; it has no tag to identify its content");
             }
         },
+        .error_set => hashInt(h, u16, @intFromError(v)),
+        .error_union => {
+            if (v) |val| {
+                h.update(&[_]u8{1});
+                hashValue(h, @TypeOf(val), val);
+            } else |err| {
+                h.update(&[_]u8{0});
+                hashInt(h, u16, @intFromError(err));
+            }
+        },
         else => @compileError("zimo: cannot hash " ++ @typeName(T) ++
             "; it has no content a pure function could depend on"),
     }
@@ -269,6 +280,57 @@ fn isSlice(comptime R: type) bool {
 fn get(comptime R: type, key: Key) ?R {
     const s = store orelse return null;
 
+    if (comptime @typeInfo(R) == .error_union) {
+        const eu = @typeInfo(R).error_union;
+        const Payload = eu.payload;
+        var file = s.dir.openFile(s.io, &key, .{}) catch return null;
+        defer file.close(s.io);
+
+        var tag: [1]u8 = undefined;
+        if ((file.readPositionalAll(s.io, &tag, 0) catch return null) != 1) return null;
+
+        if (tag[0] == 0) {
+            var err_bytes: [2]u8 = undefined;
+            if ((file.readPositionalAll(s.io, &err_bytes, 1) catch return null) != 2) return null;
+            const code = std.mem.readInt(u16, &err_bytes, .little);
+            const err: anyerror = @errorFromInt(code);
+            return @errorCast(err);
+        } else if (tag[0] == 1) {
+            if (comptime isSlice(Payload)) {
+                const Elem = @typeInfo(Payload).pointer.child;
+                const stat = file.stat(s.io) catch return null;
+                if (stat.size < 1) return null;
+                const data_len: usize = @intCast(stat.size - 1);
+                if (data_len % @sizeOf(Elem) != 0) return null;
+                const buf = s.allocator.allocWithOptions(u8, data_len, .of(Elem), null) catch return null;
+                errdefer s.allocator.free(buf);
+                const read_bytes = file.readPositionalAll(s.io, buf, 1) catch return null;
+                if (read_bytes != data_len) return null;
+                return std.mem.bytesAsSlice(Elem, buf);
+            } else if (Payload == void) {
+                return {};
+            } else {
+                var val_buf: [@sizeOf(Payload)]u8 = undefined;
+                const read_bytes = file.readPositionalAll(s.io, &val_buf, 1) catch return null;
+                if (read_bytes != @sizeOf(Payload)) return null;
+                return std.mem.bytesToValue(Payload, &val_buf);
+            }
+        }
+        return null;
+    }
+
+    if (comptime @typeInfo(R) == .error_set) {
+        var file = s.dir.openFile(s.io, &key, .{}) catch return null;
+        defer file.close(s.io);
+        var err_bytes: [2]u8 = undefined;
+        if ((file.readPositionalAll(s.io, &err_bytes, 0) catch return null) != 2) return null;
+        const stat = file.stat(s.io) catch return null;
+        if (stat.size != 2) return null;
+        const code = std.mem.readInt(u16, &err_bytes, .little);
+        const err: anyerror = @errorFromInt(code);
+        return @errorCast(err);
+    }
+
     if (comptime isSlice(R)) {
         const Elem = @typeInfo(R).pointer.child;
         const bytes = s.dir.readFileAllocOptions(s.io, &key, s.allocator, .limited(64 * 1024 * 1024), .of(Elem), null) catch return null;
@@ -288,6 +350,38 @@ fn get(comptime R: type, key: Key) ?R {
 
 fn put(comptime R: type, key: Key, value: R) void {
     const s = store orelse return;
+
+    if (comptime @typeInfo(R) == .error_union) {
+        const Payload = @typeInfo(R).error_union.payload;
+        if (value) |payload| {
+            var file = s.dir.createFile(s.io, &key, .{}) catch return;
+            defer file.close(s.io);
+            file.writePositionalAll(s.io, &[_]u8{1}, 0) catch return;
+            if (comptime isSlice(Payload)) {
+                file.writePositionalAll(s.io, std.mem.sliceAsBytes(payload), 1) catch return;
+            } else if (Payload != void) {
+                file.writePositionalAll(s.io, std.mem.asBytes(&payload), 1) catch return;
+            }
+        } else |err| {
+            var buf: [3]u8 = undefined;
+            buf[0] = 0;
+            std.mem.writeInt(u16, buf[1..3], @intFromError(err), .little);
+            var file = s.dir.createFile(s.io, &key, .{}) catch return;
+            defer file.close(s.io);
+            file.writePositionalAll(s.io, &buf, 0) catch return;
+        }
+        return;
+    }
+
+    if (comptime @typeInfo(R) == .error_set) {
+        var buf: [2]u8 = undefined;
+        std.mem.writeInt(u16, &buf, @intFromError(value), .little);
+        var file = s.dir.createFile(s.io, &key, .{}) catch return;
+        defer file.close(s.io);
+        file.writePositionalAll(s.io, &buf, 0) catch return;
+        return;
+    }
+
     const bytes = if (comptime isSlice(R)) std.mem.sliceAsBytes(value) else std.mem.asBytes(&value);
     s.dir.writeFile(s.io, .{ .sub_path = &key, .data = bytes }) catch {};
 }
@@ -457,3 +551,58 @@ test "arbitrary bit-width integer hashing" {
     try testing.expect(!std.mem.eql(u8, &keyFor("id", .{a}), &keyFor("id", .{c})));
 }
 
+test "memoising error unions with disk store" {
+    const Mod = struct {
+        pub fn fallible(x: u32) !u32 {
+            if (x == 0) return error.DivisionByZero;
+            return 100 / x;
+        }
+
+        pub fn fallibleSlice(allocator: std.mem.Allocator, x: u32) ![]u32 {
+            if (x == 0) return error.DivisionByZero;
+            const res = try allocator.alloc(u32, x);
+            for (res, 0..) |*item, idx| item.* = @intCast(idx + 1);
+            return res;
+        }
+    };
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try open(testing.allocator, testing.io, ".test_cache");
+    defer {
+        close();
+        std.Io.Dir.cwd().deleteTree(testing.io, ".test_cache") catch {};
+    }
+
+    const here = bind(Mod, "pub fn fallible(x: u32) !u32 { ... } pub fn fallibleSlice(allocator: std.mem.Allocator, x: u32) ![]u32 { ... }");
+
+    // Value error union: success and error
+    const hits_start = stats.hits;
+    const v1 = try here.call(.fallible, .{2});
+    try testing.expectEqual(@as(u32, 50), v1);
+    const v2 = try here.call(.fallible, .{2});
+    try testing.expectEqual(@as(u32, 50), v2);
+    try testing.expectEqual(hits_start + 1, stats.hits);
+
+    try testing.expectError(error.DivisionByZero, here.call(.fallible, .{0}));
+    const hits_mid = stats.hits;
+    try testing.expectError(error.DivisionByZero, here.call(.fallible, .{0}));
+    try testing.expectEqual(hits_mid + 1, stats.hits);
+
+    // Slice error union: success and error
+    const s1 = try here.call(.fallibleSlice, .{ testing.allocator, 3 });
+    defer testing.allocator.free(s1);
+    try testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, s1);
+
+    const hits_before_slice = stats.hits;
+    const s2 = try here.call(.fallibleSlice, .{ testing.allocator, 3 });
+    defer testing.allocator.free(s2);
+    try testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, s2);
+    try testing.expectEqual(hits_before_slice + 1, stats.hits);
+
+    try testing.expectError(error.DivisionByZero, here.call(.fallibleSlice, .{ testing.allocator, 0 }));
+    const hits_before_err_slice = stats.hits;
+    try testing.expectError(error.DivisionByZero, here.call(.fallibleSlice, .{ testing.allocator, 0 }));
+    try testing.expectEqual(hits_before_err_slice + 1, stats.hits);
+}
