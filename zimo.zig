@@ -39,8 +39,6 @@ pub fn bind(comptime Container: type, comptime source: []const u8) type {
     };
 }
 
-pub const Stats = struct { hits: usize = 0, misses: usize = 0 };
-pub var stats: Stats = .{};
 
 const Store = struct { allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir };
 var store: ?Store = null;
@@ -258,11 +256,7 @@ pub fn Memo(comptime id: []const u8, comptime f: anytype) type {
         pub fn call(args: Args) R {
             const key = keyFor(id, args);
 
-            if (get(R, key)) |cached| {
-                stats.hits += 1;
-                return cached;
-            }
-            stats.misses += 1;
+            if (get(R, key)) |cached| return cached;
 
             const result = @call(.auto, f, args);
             put(R, key, result);
@@ -553,12 +547,16 @@ test "arbitrary bit-width integer hashing" {
 
 test "memoising error unions with disk store" {
     const Mod = struct {
+        var invocations: usize = 0;
+
         pub fn fallible(x: u32) !u32 {
+            invocations += 1;
             if (x == 0) return error.DivisionByZero;
             return 100 / x;
         }
 
         pub fn fallibleSlice(allocator: std.mem.Allocator, x: u32) ![]u32 {
+            invocations += 1;
             if (x == 0) return error.DivisionByZero;
             const res = try allocator.alloc(u32, x);
             for (res, 0..) |*item, idx| item.* = @intCast(idx + 1);
@@ -578,31 +576,34 @@ test "memoising error unions with disk store" {
     const here = bind(Mod, "pub fn fallible(x: u32) !u32 { ... } pub fn fallibleSlice(allocator: std.mem.Allocator, x: u32) ![]u32 { ... }");
 
     // Value error union: success and error
-    const hits_start = stats.hits;
     const v1 = try here.call(.fallible, .{2});
     try testing.expectEqual(@as(u32, 50), v1);
+    try testing.expectEqual(@as(usize, 1), Mod.invocations);
+
     const v2 = try here.call(.fallible, .{2});
     try testing.expectEqual(@as(u32, 50), v2);
-    try testing.expectEqual(hits_start + 1, stats.hits);
+    try testing.expectEqual(@as(usize, 1), Mod.invocations); // Cache hit, not re-invoked
 
     try testing.expectError(error.DivisionByZero, here.call(.fallible, .{0}));
-    const hits_mid = stats.hits;
+    try testing.expectEqual(@as(usize, 2), Mod.invocations);
+
     try testing.expectError(error.DivisionByZero, here.call(.fallible, .{0}));
-    try testing.expectEqual(hits_mid + 1, stats.hits);
+    try testing.expectEqual(@as(usize, 2), Mod.invocations); // Cache hit, error restored
 
     // Slice error union: success and error
     const s1 = try here.call(.fallibleSlice, .{ testing.allocator, 3 });
     defer testing.allocator.free(s1);
     try testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, s1);
+    try testing.expectEqual(@as(usize, 3), Mod.invocations);
 
-    const hits_before_slice = stats.hits;
     const s2 = try here.call(.fallibleSlice, .{ testing.allocator, 3 });
     defer testing.allocator.free(s2);
     try testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, s2);
-    try testing.expectEqual(hits_before_slice + 1, stats.hits);
+    try testing.expectEqual(@as(usize, 3), Mod.invocations); // Cache hit
 
     try testing.expectError(error.DivisionByZero, here.call(.fallibleSlice, .{ testing.allocator, 0 }));
-    const hits_before_err_slice = stats.hits;
+    try testing.expectEqual(@as(usize, 4), Mod.invocations);
+
     try testing.expectError(error.DivisionByZero, here.call(.fallibleSlice, .{ testing.allocator, 0 }));
-    try testing.expectEqual(hits_before_err_slice + 1, stats.hits);
+    try testing.expectEqual(@as(usize, 4), Mod.invocations); // Cache hit
 }

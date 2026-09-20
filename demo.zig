@@ -166,16 +166,13 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(first_result);
 
     for ([_]f32{ 0.40, 0.40, 0.60 }, 0..) |min_confidence, run| {
-        const hits_before = zimo.stats.hits;
         const start = std.Io.Timestamp.now(init.io, .awake);
 
         const detections = try here.call(.detectObjects, .{ init.gpa, init.io, image_path, min_confidence });
         const elapsed = start.untilNow(init.io, .awake);
-        const status = if (zimo.stats.hits > hits_before) "HIT " else "MISS";
 
-        std.debug.print("detectObjects(street, {d:.2})    {s}  {f: >9} -> {d} detections\n", .{
+        std.debug.print("detectObjects(street, {d:.2})    {f: >9} -> {d} detections\n", .{
             min_confidence,
-            status,
             elapsed,
             detections.len,
         });
@@ -196,5 +193,5 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try saveAnnotatedImage(init.gpa, init.io, image_path, annotated_path, first_result);
-    std.debug.print("\nhits={d} misses={d}\nSaved annotated image to {s}\n", .{ zimo.stats.hits, zimo.stats.misses, annotated_path });
+    std.debug.print("\nSaved annotated image to {s}\n", .{annotated_path});
 }
