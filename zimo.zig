@@ -29,12 +29,26 @@ pub fn bind(comptime Container: type, comptime source: []const u8) type {
             comptime target: @EnumLiteral(),
             args: anytype,
         ) @typeInfo(@TypeOf(@field(Container, @tagName(target)))).@"fn".return_type.? {
-            return Memo(id(target), @field(Container, @tagName(target))).call(args);
+            return memoCall(@field(Container, @tagName(target)), id(target), args);
         }
 
         /// The cache identity of `target`, for display.
         pub fn id(comptime target: @EnumLiteral()) []const u8 {
-            return identity.of(source, @tagName(target));
+            const Cache = struct {
+                fn Holder(comptime t: @EnumLiteral()) type {
+                    return struct {
+                        pub const tag = t;
+                        var id_bytes: [64]u8 = undefined;
+                        var initialized: bool = false;
+                    };
+                }
+            };
+            const entry = Cache.Holder(target);
+            if (!entry.initialized) {
+                entry.id_bytes = identity.of(source, @tagName(target));
+                entry.initialized = true;
+            }
+            return &entry.id_bytes;
         }
     };
 }
@@ -235,7 +249,7 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
 pub const Key = [16]u8;
 
 /// The cache key for one call: the function's identity plus its arguments.
-pub fn keyFor(comptime id: []const u8, args: anytype) Key {
+pub fn keyFor(id: []const u8, args: anytype) Key {
     var h = Hash.init(0);
     h.update(id);
     hashValue(&h, @TypeOf(args), args);
@@ -243,6 +257,20 @@ pub fn keyFor(comptime id: []const u8, args: anytype) Key {
     var hex: Key = undefined;
     _ = std.fmt.bufPrint(&hex, "{x:0>16}", .{digest}) catch unreachable;
     return hex;
+}
+
+pub fn memoCall(comptime f: anytype, id: []const u8, args: std.meta.ArgsTuple(@TypeOf(f))) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    const F = @TypeOf(f);
+    const R = @typeInfo(F).@"fn".return_type.?;
+    comptime assertStorable(R);
+
+    const key = keyFor(id, args);
+
+    if (get(R, key)) |cached| return cached;
+
+    const result = @call(.auto, f, args);
+    put(R, key, result);
+    return result;
 }
 
 /// Wraps `f` in a memoised function. Call as `Memo(id, f).call(.{ a, b })`.
@@ -254,13 +282,7 @@ pub fn Memo(comptime id: []const u8, comptime f: anytype) type {
 
     return struct {
         pub fn call(args: Args) R {
-            const key = keyFor(id, args);
-
-            if (get(R, key)) |cached| return cached;
-
-            const result = @call(.auto, f, args);
-            put(R, key, result);
-            return result;
+            return memoCall(f, id, args);
         }
     };
 }
