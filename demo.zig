@@ -134,7 +134,7 @@ fn saveAnnotatedImage(allocator: std.mem.Allocator, io: std.Io, input_path: []co
     const rgb = image.pixels.rgb24;
 
     for (detections) |d| {
-        const color = if (d.class_id == 0) zigimg.color.Rgb24{ .r = 0, .g = 255, .b = 0 } else zigimg.color.Rgb24{ .r = 0, .g = 180, .b = 255 };
+        const color: zigimg.color.Rgb24 = if (d.class_id == 0) .{ .g = 255 } else .{ .g = 180, .b = 255 };
         const x1: usize = @intFromFloat(d.x1);
         const y1: usize = @intFromFloat(d.y1);
         const x2: usize = @intFromFloat(d.x2);

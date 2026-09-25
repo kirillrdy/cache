@@ -138,10 +138,10 @@ fn hashElems(h: *Hash, comptime T: type, elems: []const T) void {
 fn hashInt(h: *Hash, comptime T: type, v: T) void {
     const info = @typeInfo(T).int;
     if (comptime info.bits % 8 != 0) {
-        const ByteInt = std.meta.Int(info.signedness, @divFloor(info.bits + 7, 8) * 8);
+        const ByteInt = std.meta.Int(info.signedness, std.mem.alignForward(usize, info.bits, 8));
         return hashInt(h, ByteInt, @as(ByteInt, v));
     }
-    var buf: [@divExact(info.bits, 8)]u8 = undefined;
+    var buf: [@sizeOf(T)]u8 = undefined;
     std.mem.writeInt(T, &buf, v, .little);
     h.update(&buf);
 }
@@ -314,15 +314,10 @@ fn get(comptime R: type, key: Key) ?R {
     }
 
     if (comptime @typeInfo(R) == .error_set) {
-        var file = s.dir.openFile(s.io, &key, .{}) catch return null;
-        defer file.close(s.io);
-        var err_bytes: [2]u8 = undefined;
-        if ((file.readPositionalAll(s.io, &err_bytes, 0) catch return null) != 2) return null;
-        const stat = file.stat(s.io) catch return null;
-        if (stat.size != 2) return null;
-        const code = std.mem.readInt(u16, &err_bytes, .little);
-        const err: anyerror = @errorFromInt(code);
-        return @errorCast(err);
+        var err_bytes: [3]u8 = undefined;
+        const bytes = s.dir.readFile(s.io, &key, &err_bytes) catch return null;
+        if (bytes.len != 2) return null;
+        return @errorCast(@as(anyerror, @errorFromInt(std.mem.readInt(u16, bytes[0..2], .little))));
     }
 
     if (comptime isSlice(R)) {
@@ -350,7 +345,7 @@ fn put(comptime R: type, key: Key, value: R) void {
         if (value) |payload| {
             var file = s.dir.createFile(s.io, &key, .{}) catch return;
             defer file.close(s.io);
-            file.writePositionalAll(s.io, &[_]u8{1}, 0) catch return;
+            file.writePositionalAll(s.io, &.{1}, 0) catch return;
             if (comptime isSlice(Payload)) {
                 file.writePositionalAll(s.io, std.mem.sliceAsBytes(payload), 1) catch return;
             } else if (Payload != void) {
@@ -360,9 +355,7 @@ fn put(comptime R: type, key: Key, value: R) void {
             var buf: [3]u8 = undefined;
             buf[0] = 0;
             std.mem.writeInt(u16, buf[1..3], @intFromError(err), .little);
-            var file = s.dir.createFile(s.io, &key, .{}) catch return;
-            defer file.close(s.io);
-            file.writePositionalAll(s.io, &buf, 0) catch return;
+            s.dir.writeFile(s.io, .{ .sub_path = &key, .data = &buf }) catch {};
         }
         return;
     }
@@ -370,9 +363,7 @@ fn put(comptime R: type, key: Key, value: R) void {
     if (comptime @typeInfo(R) == .error_set) {
         var buf: [2]u8 = undefined;
         std.mem.writeInt(u16, &buf, @intFromError(value), .little);
-        var file = s.dir.createFile(s.io, &key, .{}) catch return;
-        defer file.close(s.io);
-        file.writePositionalAll(s.io, &buf, 0) catch return;
+        s.dir.writeFile(s.io, .{ .sub_path = &key, .data = &buf }) catch {};
         return;
     }
 
