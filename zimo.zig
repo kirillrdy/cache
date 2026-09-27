@@ -32,6 +32,14 @@ pub fn bind(comptime Container: type, comptime source: []const u8) type {
             return memoCall(@field(Container, @tagName(target)), id(target), args);
         }
 
+        /// Return a cached result without evaluating the function on a miss.
+        pub fn lookup(
+            comptime target: @EnumLiteral(),
+            args: anytype,
+        ) ?@typeInfo(@TypeOf(@field(Container, @tagName(target)))).@"fn".return_type.? {
+            return memoLookup(@field(Container, @tagName(target)), id(target), args);
+        }
+
         /// The cache identity of `target`, for display.
         pub fn id(comptime target: @EnumLiteral()) []const u8 {
             const Cache = struct {
@@ -273,6 +281,12 @@ pub fn memoCall(comptime f: anytype, id: []const u8, args: std.meta.ArgsTuple(@T
     return result;
 }
 
+pub fn memoLookup(comptime f: anytype, id: []const u8, args: std.meta.ArgsTuple(@TypeOf(f))) ?@typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    const R = @typeInfo(@TypeOf(f)).@"fn".return_type.?;
+    comptime assertStorable(R);
+    return get(R, keyFor(id, args));
+}
+
 /// Wraps `f` in a memoised function. Call as `Memo(id, f).call(.{ a, b })`.
 pub fn Memo(comptime id: []const u8, comptime f: anytype) type {
     const F = @TypeOf(f);
@@ -406,6 +420,28 @@ test "key is content-addressed, not address-addressed" {
     const one: u32 = 7;
     const other: u32 = 7;
     try testing.expectEqual(keyFor("id", .{&one}), keyFor("id", .{&other}));
+}
+
+test "lookup does not evaluate on a miss" {
+    const Counter = struct {
+        var calls: u32 = 0;
+        fn compute(n: u32) u32 {
+            calls += 1;
+            return n + 1;
+        }
+    };
+    const path = ".test_lookup_cache";
+    try open(testing.allocator, testing.io, path);
+    defer {
+        close();
+        std.Io.Dir.cwd().deleteTree(testing.io, path) catch {};
+    }
+    const id = "lookup-does-not-compute";
+    try testing.expect(memoLookup(Counter.compute, id, .{@as(u32, 41)}) == null);
+    try testing.expectEqual(@as(u32, 0), Counter.calls);
+    try testing.expectEqual(@as(u32, 42), memoCall(Counter.compute, id, .{@as(u32, 41)}));
+    try testing.expectEqual(@as(?u32, 42), memoLookup(Counter.compute, id, .{@as(u32, 41)}));
+    try testing.expectEqual(@as(u32, 1), Counter.calls);
 }
 
 test "key distinguishes what a pure function can distinguish" {
