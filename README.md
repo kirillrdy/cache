@@ -43,9 +43,19 @@ defer zimo.close();
 
 // Call memoised function
 const result = here.call(.score, .{ xs, w });
+
+// Return immediately and compute in the background when needed.
+const frame = try here.callAsync(.score, .{ xs, w });
+switch (frame) {
+    .hit => |value| use(value),   // current cached result
+    .stale => |value| use(value), // prior function version; refresh queued
+    .miss => |_| {},             // no cached result; computation queued
+}
 ```
 
 That is the entire setup. One binding per file, one line per cached call. No code generation step, no build artifacts to wire up, and no risk of the checksum going out of sync with the source — the compiler derives the identity directly from the file bytes at compile time.
+
+`callAsync` requires an open disk store. Each variant carries the function's return type; `.miss` carries its zero value. Calls for the same missing key share one queued computation. The worker copies argument contents before returning, uses its own arena for allocator arguments, and `close()` waits for outstanding work. Keep any I/O interface passed to the function alive until `close()` returns. If the function's source identity changes while its name, argument types, and return type stay compatible, `.stale` returns the last completed value until the new version is cached. Results that contain slices use the store allocator on cache hits, just like `call`.
 
 ## How it works at comptime
 

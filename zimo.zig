@@ -15,6 +15,23 @@ const identity = @import("identity.zig");
 const Hash = std.hash.XxHash3;
 const native_endian = @import("builtin").cpu.arch.endian();
 
+fn IdHolder(comptime source: []const u8, comptime name: []const u8) type {
+    return struct {
+        var id_bytes: [64]u8 = undefined;
+        var initialized: bool = false;
+
+        fn get() []const u8 {
+            store_mutex.lock();
+            defer store_mutex.unlock();
+            if (!initialized) {
+                id_bytes = identity.of(source, name);
+                initialized = true;
+            }
+            return &id_bytes;
+        }
+    };
+}
+
 /// Binds a container scope and its source text, so each cached function costs one line.
 ///
 ///     const here = zimo.bind(@This(), @embedFile("demo.zig"));
@@ -32,23 +49,14 @@ pub fn bind(comptime Container: type, comptime source: []const u8) type {
             return memoCall(@field(Container, @tagName(target)), id(target), args);
         }
 
+        /// Return cached data immediately and schedule a missing or changed call.
+        pub fn callAsync(comptime target: @EnumLiteral(), args: anytype) !AsyncResult(@typeInfo(@TypeOf(@field(Container, @tagName(target)))).@"fn".return_type.?) {
+            return memoCallAsync(@field(Container, @tagName(target)), id(target), @typeName(Container) ++ "." ++ @tagName(target), args);
+        }
+
         /// The cache identity of `target`, for display.
         pub fn id(comptime target: @EnumLiteral()) []const u8 {
-            const Cache = struct {
-                fn Holder(comptime t: @EnumLiteral()) type {
-                    return struct {
-                        pub const tag = t;
-                        var id_bytes: [64]u8 = undefined;
-                        var initialized: bool = false;
-                    };
-                }
-            };
-            const entry = Cache.Holder(target);
-            if (!entry.initialized) {
-                entry.id_bytes = identity.of(source, @tagName(target));
-                entry.initialized = true;
-            }
-            return &entry.id_bytes;
+            return IdHolder(source, @tagName(target)).get();
         }
     };
 }
@@ -56,9 +64,26 @@ pub fn bind(comptime Container: type, comptime source: []const u8) type {
 
 const Store = struct { allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir };
 var store: ?Store = null;
+const Lock = struct {
+    state: std.atomic.Mutex = .unlocked,
+
+    fn lock(self: *Lock) void {
+        while (!self.state.tryLock()) std.Thread.yield() catch {};
+    }
+
+    fn unlock(self: *Lock) void {
+        self.state.unlock();
+    }
+};
+var store_mutex: Lock = .{};
+var workers: usize = 0;
+var pending: std.AutoHashMapUnmanaged(Key, void) = .empty;
 
 /// Point the cache at a directory. Entries survive across processes.
 pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    store_mutex.lock();
+    defer store_mutex.unlock();
+    if (store != null) return error.CacheAlreadyOpen;
     store = .{
         .allocator = allocator,
         .io = io,
@@ -67,8 +92,17 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
 }
 
 pub fn close() void {
+    store_mutex.lock();
+    while (workers != 0) {
+        store_mutex.unlock();
+        std.Thread.yield() catch {};
+        store_mutex.lock();
+    }
+    if (store) |s| pending.deinit(s.allocator);
+    pending = .empty;
     if (store) |s| s.dir.close(s.io);
     store = null;
+    store_mutex.unlock();
 }
 
 // ------------------------------------------------------------ comptime ---
@@ -266,11 +300,170 @@ pub fn memoCall(comptime f: anytype, id: []const u8, args: std.meta.ArgsTuple(@T
 
     const key = keyFor(id, args);
 
-    if (get(R, key)) |cached| return cached;
+    store_mutex.lock();
+    const cached = get(R, key);
+    store_mutex.unlock();
+    if (cached) |value| return value;
 
     const result = @call(.auto, f, args);
+    store_mutex.lock();
     put(R, key, result);
+    store_mutex.unlock();
     return result;
+}
+
+/// A cached value, an empty value while work is queued, or an older value
+/// while the current function version is being computed.
+pub fn AsyncResult(comptime R: type) type {
+    return union(enum) { hit: R, miss: R, stale: R };
+}
+
+fn zeroResult(comptime R: type) R {
+    if (comptime @typeInfo(R) == .error_union)
+        return std.mem.zeroes(@typeInfo(R).error_union.payload);
+    return std.mem.zeroes(R);
+}
+
+fn cloneArg(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
+    if (T == std.mem.Allocator) return allocator;
+    if (T == std.Io) return value;
+    return switch (@typeInfo(T)) {
+        .pointer => |p| switch (p.size) {
+            .one => blk: {
+                const copy = try allocator.create(p.child);
+                copy.* = try cloneArg(allocator, p.child, value.*);
+                break :blk copy;
+            },
+            .slice => blk: {
+                const copy = try allocator.alloc(p.child, value.len);
+                for (value, copy) |item, *dest| dest.* = try cloneArg(allocator, p.child, item);
+                break :blk copy;
+            },
+            else => @compileError("zimo: async argument needs a known length"),
+        },
+        .@"struct" => |s| blk: {
+            var copy: T = undefined;
+            inline for (s.fields) |field| {
+                @field(copy, field.name) = try cloneArg(allocator, field.type, @field(value, field.name));
+            }
+            break :blk copy;
+        },
+        .array => |a| blk: {
+            var copy: T = undefined;
+            for (value, &copy) |item, *dest| dest.* = try cloneArg(allocator, a.child, item);
+            break :blk copy;
+        },
+        .optional => |o| if (value) |item| try cloneArg(allocator, o.child, item) else null,
+        .@"union" => |u| blk: {
+            if (u.tag_type == null) @compileError("zimo: async argument cannot contain an untagged union");
+            break :blk switch (value) {
+                inline else => |payload, tag| @unionInit(T, @tagName(tag), try cloneArg(allocator, @TypeOf(payload), payload)),
+            };
+        },
+        .error_union => if (value) |payload| try cloneArg(allocator, @TypeOf(payload), payload) else |err| err,
+        else => value,
+    };
+}
+
+fn hashResultType(h: *Hash, comptime T: type) void {
+    h.update(@typeName(T));
+    hashInt(h, u64, @sizeOf(T));
+    hashInt(h, u64, @alignOf(T));
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| inline for (s.fields) |field| {
+            h.update(field.name);
+            hashResultType(h, field.type);
+        },
+        .array => |a| {
+            hashInt(h, u64, a.len);
+            hashResultType(h, a.child);
+        },
+        .optional => |o| hashResultType(h, o.child),
+        .error_union => |eu| {
+            hashResultType(h, eu.error_set);
+            hashResultType(h, eu.payload);
+        },
+        .pointer => |p| hashResultType(h, p.child),
+        .@"enum" => |e| inline for (e.fields) |field| {
+            h.update(field.name);
+            hashInt(h, u64, field.value);
+        },
+        else => {},
+    }
+}
+
+/// A stable address for the last completed version of a named function call.
+/// The result type is part of the address so stale bytes are never decoded as
+/// an incompatible return type.
+fn latestKey(comptime R: type, name: []const u8, args: anytype) [18]u8 {
+    var h = Hash.init(0);
+    h.update(name);
+    hashResultType(&h, R);
+    hashValue(&h, @TypeOf(args), args);
+    var key: [18]u8 = undefined;
+    key[0..2].* = "s-".*;
+    _ = std.fmt.bufPrint(key[2..], "{x:0>16}", .{h.final()}) catch unreachable;
+    return key;
+}
+
+fn previousKey(index: [18]u8) ?Key {
+    const s = store orelse return null;
+    var buf: [17]u8 = undefined;
+    const bytes = s.dir.readFile(s.io, &index, &buf) catch return null;
+    if (bytes.len != 16) return null;
+    return bytes[0..16].*;
+}
+
+fn worker(comptime f: anytype, comptime R: type, args: std.meta.ArgsTuple(@TypeOf(f)), key: Key, index: [18]u8, arena: *std.heap.ArenaAllocator) void {
+    const result = @call(.auto, f, args);
+    store_mutex.lock();
+    put(R, key, result);
+    if (store) |s| s.dir.writeFile(s.io, .{ .sub_path = &index, .data = &key }) catch {};
+    _ = pending.remove(key);
+    store_mutex.unlock();
+    const allocator = arena.child_allocator;
+    arena.deinit();
+    allocator.destroy(arena);
+    store_mutex.lock();
+    workers -= 1;
+    store_mutex.unlock();
+}
+
+/// Enqueue a cache miss and return immediately. `open` must have been called.
+/// `close` waits for queued computations before closing the store.
+pub fn memoCallAsync(comptime f: anytype, id: []const u8, name: []const u8, args: std.meta.ArgsTuple(@TypeOf(f))) !AsyncResult(@typeInfo(@TypeOf(f)).@"fn".return_type.?) {
+    const R = @typeInfo(@TypeOf(f)).@"fn".return_type.?;
+    comptime assertStorable(R);
+    const key = keyFor(id, args);
+    const index = latestKey(R, name, args);
+
+    store_mutex.lock();
+    defer store_mutex.unlock();
+    const s = store orelse return error.CacheNotOpen;
+    if (get(R, key)) |value| return .{ .hit = value };
+
+    const stale = if (previousKey(index)) |old_key|
+        if (!std.mem.eql(u8, &old_key, &key)) get(R, old_key) else null
+    else
+        null;
+
+    if (!pending.contains(key)) {
+        const arena = try s.allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(s.allocator);
+        errdefer {
+            arena.deinit();
+            s.allocator.destroy(arena);
+        }
+        const copied_args = try cloneArg(arena.allocator(), @TypeOf(args), args);
+        try pending.put(s.allocator, key, {});
+        errdefer _ = pending.remove(key);
+        workers += 1;
+        errdefer workers -= 1;
+        const thread = try std.Thread.spawn(.{}, worker, .{ f, R, copied_args, key, index, arena });
+        thread.detach();
+    }
+    if (stale) |value| return .{ .stale = value };
+    return .{ .miss = zeroResult(R) };
 }
 
 /// Wraps `f` in a memoised function. Call as `Memo(id, f).call(.{ a, b })`.
@@ -619,4 +812,82 @@ test "memoising error unions with disk store" {
 
     try testing.expectError(error.DivisionByZero, here.call(.fallibleSlice, .{ testing.allocator, 0 }));
     try testing.expectEqual(@as(usize, 4), Mod.invocations); // Cache hit
+}
+
+test "async call returns miss, stale, then hit and owns queued arguments" {
+    const Mod = struct {
+        var gate = std.atomic.Value(bool).init(false);
+        var calls = std.atomic.Value(usize).init(0);
+        var multiplier = std.atomic.Value(u32).init(2);
+
+        fn calculate(values: []const u32) u32 {
+            _ = calls.fetchAdd(1, .seq_cst);
+            while (!gate.load(.seq_cst)) std.Thread.yield() catch {};
+            return values[0] * multiplier.load(.seq_cst);
+        }
+    };
+
+    std.Io.Dir.cwd().deleteTree(testing.io, ".test_async_cache") catch {};
+    try open(testing.allocator, testing.io, ".test_async_cache");
+    defer {
+        Mod.gate.store(true, .seq_cst);
+        close();
+        std.Io.Dir.cwd().deleteTree(testing.io, ".test_async_cache") catch {};
+    }
+
+    var values = [_]u32{21};
+    const first = try memoCallAsync(Mod.calculate, "v1", "calculate", .{values[0..]});
+    try testing.expectEqual(@as(u32, 0), first.miss);
+    values[0] = 99;
+    const duplicate = try memoCallAsync(Mod.calculate, "v1", "calculate", .{&[_]u32{21}});
+    try testing.expectEqual(@as(u32, 0), duplicate.miss);
+    Mod.gate.store(true, .seq_cst);
+    close();
+    try testing.expectEqual(@as(usize, 1), Mod.calls.load(.seq_cst));
+
+    try open(testing.allocator, testing.io, ".test_async_cache");
+    const cached = try memoCallAsync(Mod.calculate, "v1", "calculate", .{&[_]u32{21}});
+    try testing.expectEqual(@as(u32, 42), cached.hit);
+
+    Mod.gate.store(false, .seq_cst);
+    Mod.multiplier.store(3, .seq_cst);
+    const old = try memoCallAsync(Mod.calculate, "v2", "calculate", .{&[_]u32{21}});
+    try testing.expectEqual(@as(u32, 42), old.stale);
+    Mod.gate.store(true, .seq_cst);
+    close();
+
+    try open(testing.allocator, testing.io, ".test_async_cache");
+    const updated = try memoCallAsync(Mod.calculate, "v2", "calculate", .{&[_]u32{21}});
+    try testing.expectEqual(@as(u32, 63), updated.hit);
+
+    const here = bind(Mod, "fn calculate(values: []const u32) u32 { return values[0] * 3; }");
+    const bound = try here.callAsync(.calculate, .{&[_]u32{21}});
+    try testing.expectEqual(@as(u32, 0), bound.miss);
+    close();
+    try open(testing.allocator, testing.io, ".test_async_cache");
+    const changed = bind(Mod, "fn calculate(values: []const u32) u32 { return values[0] * 4; }");
+    const bound_stale = try changed.callAsync(.calculate, .{&[_]u32{21}});
+    try testing.expectEqual(@as(u32, 63), bound_stale.stale);
+}
+
+test "async call supports an error union slice result" {
+    const Mod = struct {
+        fn words(allocator: std.mem.Allocator) anyerror![]const u8 {
+            return try allocator.dupe(u8, "ok");
+        }
+    };
+    std.Io.Dir.cwd().deleteTree(testing.io, ".test_async_slice") catch {};
+    try open(testing.allocator, testing.io, ".test_async_slice");
+    defer {
+        close();
+        std.Io.Dir.cwd().deleteTree(testing.io, ".test_async_slice") catch {};
+    }
+    const first = try memoCallAsync(Mod.words, "v1", "words", .{testing.allocator});
+    try testing.expectEqual(@as(usize, 0), (try first.miss).len);
+    close();
+    try open(testing.allocator, testing.io, ".test_async_slice");
+    const second = try memoCallAsync(Mod.words, "v1", "words", .{testing.allocator});
+    const words = try second.hit;
+    defer testing.allocator.free(words);
+    try testing.expectEqualStrings("ok", words);
 }
