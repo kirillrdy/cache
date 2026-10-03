@@ -61,7 +61,6 @@ pub fn bind(comptime Container: type, comptime source: []const u8) type {
     };
 }
 
-
 const Store = struct { allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir };
 var store: ?Store = null;
 const Lock = struct {
@@ -113,7 +112,7 @@ fn assertStorable(comptime T: type) void {
     switch (@typeInfo(T)) {
         .int, .float, .bool, .void, .@"enum", .error_set => {},
         .error_union => |eu| assertStorable(eu.payload),
-        .@"struct" => |s| for (s.fields) |f| assertStorable(f.type),
+        .@"struct" => |s| for (s.field_types) |Field| assertStorable(Field),
         .array => |a| assertStorable(a.child),
         .optional => |o| assertStorable(o.child),
         .pointer => |p| switch (p.size) {
@@ -127,7 +126,7 @@ fn assertStorable(comptime T: type) void {
 
 /// The canonical bits of a float. A pure function cannot distinguish one NaN
 /// from another, nor -0.0 from +0.0, so both collapse to a single value.
-fn floatBits(comptime T: type, v: T) std.meta.Int(.unsigned, @bitSizeOf(T)) {
+fn floatBits(comptime T: type, v: T) @Int(.unsigned, @bitSizeOf(T)) {
     if (std.math.isNan(v)) return @bitCast(std.math.nan(T));
     if (v == 0) return 0;
     return @bitCast(v);
@@ -144,10 +143,10 @@ fn plainBytes(comptime T: type) bool {
         .@"struct" => |s| blk: {
             if (s.layout == .@"packed") return @sizeOf(T) * 8 == @bitSizeOf(T);
             var sum: usize = 0;
-            inline for (s.fields) |f| {
-                if (@sizeOf(f.type) == 0) continue;
-                if (!plainBytes(f.type)) break :blk false;
-                sum += @sizeOf(f.type);
+            inline for (s.field_types) |Field| {
+                if (@sizeOf(Field) == 0) continue;
+                if (!plainBytes(Field)) break :blk false;
+                sum += @sizeOf(Field);
             }
             break :blk sum == @sizeOf(T);
         },
@@ -186,7 +185,7 @@ fn hashElems(h: *Hash, comptime T: type, elems: []const T) void {
 fn hashInt(h: *Hash, comptime T: type, v: T) void {
     const info = @typeInfo(T).int;
     if (comptime info.bits % 8 != 0) {
-        const ByteInt = std.meta.Int(info.signedness, std.mem.alignForward(usize, info.bits, 8));
+        const ByteInt = @Int(info.signedness, std.mem.alignForward(usize, info.bits, 8));
         return hashInt(h, ByteInt, @as(ByteInt, v));
     }
     var buf: [@sizeOf(T)]u8 = undefined;
@@ -211,10 +210,10 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
         // two argument tuples that a pure function cannot tell apart would
         // otherwise get different keys.
         .@"struct" => |s| {
-            hashInt(h, u64, s.fields.len);
-            inline for (s.fields) |f| {
-                h.update(f.name);
-                hashValue(h, f.type, @field(v, f.name));
+            hashInt(h, u64, s.field_names.len);
+            inline for (s.field_names, s.field_types) |name, Field| {
+                h.update(name);
+                hashValue(h, Field, @field(v, name));
             }
             return;
         },
@@ -227,8 +226,8 @@ fn hashValue(h: *Hash, comptime T: type, v: T) void {
         .void => {},
         .bool => h.update(&[_]u8{@intFromBool(v)}),
         .int => hashInt(h, T, v),
-        .@"enum" => |e| hashInt(h, e.tag_type, @intFromEnum(v)),
-        .float => |f| hashInt(h, std.meta.Int(.unsigned, f.bits), floatBits(T, v)),
+        .@"enum" => |e| hashInt(h, e.tag_type, @backingInt(v)),
+        .float => |f| hashInt(h, @Int(.unsigned, f.bits), floatBits(T, v)),
         .optional => |o| if (v) |inner| {
             h.update(&[_]u8{1});
             hashValue(h, o.child, inner);
@@ -343,8 +342,8 @@ fn cloneArg(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
         },
         .@"struct" => |s| blk: {
             var copy: T = undefined;
-            inline for (s.fields) |field| {
-                @field(copy, field.name) = try cloneArg(allocator, field.type, @field(value, field.name));
+            inline for (s.field_names, s.field_types) |name, Field| {
+                @field(copy, name) = try cloneArg(allocator, Field, @field(value, name));
             }
             break :blk copy;
         },
@@ -370,9 +369,9 @@ fn hashResultType(h: *Hash, comptime T: type) void {
     hashInt(h, u64, @sizeOf(T));
     hashInt(h, u64, @alignOf(T));
     switch (@typeInfo(T)) {
-        .@"struct" => |s| inline for (s.fields) |field| {
-            h.update(field.name);
-            hashResultType(h, field.type);
+        .@"struct" => |s| inline for (s.field_names, s.field_types) |name, Field| {
+            h.update(name);
+            hashResultType(h, Field);
         },
         .array => |a| {
             hashInt(h, u64, a.len);
@@ -384,9 +383,9 @@ fn hashResultType(h: *Hash, comptime T: type) void {
             hashResultType(h, eu.payload);
         },
         .pointer => |p| hashResultType(h, p.child),
-        .@"enum" => |e| inline for (e.fields) |field| {
-            h.update(field.name);
-            hashInt(h, u64, field.value);
+        .@"enum" => |e| inline for (e.field_names, e.field_values) |name, value| {
+            h.update(name);
+            hashInt(h, u64, value);
         },
         else => {},
     }

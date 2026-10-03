@@ -29,8 +29,8 @@ pub fn of(source: []const u8, target_name: []const u8) [64]u8 {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const source_z = allocator.dupeZ(u8, source) catch @panic("OOM");
-    var tree = std.zig.Ast.parse(allocator, source_z, .zig) catch @panic("identity: failed to parse Zig source");
+    const source_z = allocator.dupeSentinel(u8, source, 0) catch @panic("OOM");
+    var tree = std.zig.Ast.parse(allocator, source_z, .{ .mode = .zig }) catch @panic("identity: failed to parse Zig source");
 
     var decls: std.ArrayList(DeclInfo) = .empty;
 
@@ -133,4 +133,3 @@ test "identity: whitespace and comments do not affect target id" {
     const id2 = of(src2, "foo");
     try testing.expectEqualStrings(&id1, &id2);
 }
-
