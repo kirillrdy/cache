@@ -10,24 +10,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const zigimg_dep = b.dependency("zigimg", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const backend = b.option(
-        []const u8,
-        "backend",
-        "GPU backend for inference: opencl, cuda, or metal (defaults to metal on macOS and opencl elsewhere)",
-    ) orelse if (target.result.os.tag == .macos) "metal" else "opencl";
-    const onnx = b.dependency("onnx", .{
-        .target = target,
-        .optimize = optimize,
-        .backend = backend,
-        // The model works in pixel coordinates of the full image, which are
-        // past what a half holds exactly.
-        .half = false,
-    });
-
     const demo = b.addExecutable(.{
         .name = "demo",
         .root_module = b.createModule(.{
@@ -35,28 +17,15 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zigimg", .module = zigimg_dep.module("zigimg") },
                 .{ .name = "zimo", .module = zimo_mod },
-                .{ .name = "onnx", .module = onnx.module("onnx") },
             },
         }),
     });
-    b.installArtifact(demo);
-
-    fetch(b, "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/object_detection_segmentation/tiny-yolov3/model/tiny-yolov3-11.onnx", "models/tiny-yolov3-11.onnx");
-    fetch(b, "https://upload.wikimedia.org/wikipedia/commons/c/c5/Tokyo_Shibuya_Scramble_Crossing_2018-10-09.jpg", "images/street.jpg");
+    b.step("demo", "Build and install the caching demo").dependOn(&b.addInstallArtifact(demo, .{}).step);
 
     const run_demo = b.addRunArtifact(demo);
-    run_demo.step.dependOn(b.getInstallStep());
     b.step("run", "Run the caching demo").dependOn(&run_demo.step);
 
     const tests = b.addTest(.{ .root_module = zimo_mod });
     b.step("test", "Test the runtime").dependOn(&b.addRunArtifact(tests).step);
-}
-
-/// Downloads `url` at build time and installs it at `dest` under the prefix.
-fn fetch(b: *std.Build, url: []const u8, dest: []const u8) void {
-    const curl = b.addSystemCommand(&.{ "curl", "-sL", url });
-    const file = curl.addPrefixedOutputFileArg("-o", std.Io.Dir.path.basename(dest));
-    b.getInstallStep().dependOn(&b.addInstallFile(file, dest).step);
 }

@@ -5,15 +5,16 @@ Function-call caching keyed on a checksum of the function's source and its argum
 ```
 zimo.zig       library: memo wrappers, comptime argument hashing, disk store
 identity.zig   library: transitive source checksum, computed at comptime
-demo.zig       example: ONNX YOLOv3 inference with cached execution
+demo.zig       example: cached calculation with a simulated compute delay
 ```
 
 ```sh
 zig build test                       # runtime tests
-zig build run                        # object detection demo; run twice to see cache hit
+zig build run                        # caching demo; run twice to see persistent cache hits
+zig build demo                       # optionally install the demo to zig-out/bin
 ```
 
-The demo needs nothing installed beyond a GPU driver. Inference runs on the [onnx](https://github.com/kirillrdy/onnx) package, a Zig ONNX runtime with OpenCL, CUDA and Metal backends. It defaults to Metal on macOS and OpenCL elsewhere; pass `-Dbackend=opencl`, `-Dbackend=cuda`, or `-Dbackend=metal` to override it. The model and test image are fetched by the build.
+The library and demo use only the Zig standard library, with no external dependencies or downloads. The demo sleeps for one second before squaring a number to simulate expensive computation. It calls the function with `12`, `12`, and `13`: the repeated argument returns from cache immediately, while a new argument incurs the delay. Results persist in `.zimo`, so subsequent runs reuse both results. The default build exposes the `zimo` library module; the demo is built only when requested.
 
 ## The key
 

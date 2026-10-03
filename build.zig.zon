@@ -1,17 +1,7 @@
 .{
     .name = .zimo,
     .version = "0.1.0",
-    .dependencies = .{
-        .zigimg = .{
-            .url = "git+https://github.com/nothke/zigimg#581795265e1caee099baae32883c0f9d4f28f81a",
-            .hash = "zigimg-0.1.0-8_eo2jPCFwDJF89NMU5gJjpTRoFdda26viRcdxyJP0Ks",
-        },
-
-        .onnx = .{
-            .url = "git+https://github.com/kirillrdy/onnx#0b15ed96322733b4243497d01d875af86343e14b",
-            .hash = "onnx-0.0.0-S9CpBbDSCABts3VUBMOM3IleUnltmYxFD_F0WNlP-U7y",
-        },
-    },
+    .dependencies = .{},
     .fingerprint = 0x6f9e0668843f5ed3,
     .minimum_zig_version = "0.16.0",
     .paths = .{
